@@ -18,7 +18,6 @@ from google.cloud.firestore_v1 import Client as FirestoreClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 import google.cloud.firestore_v1.transaction as firestore_transaction
 from aiohttp import web
-import threading
 from dotenv import load_dotenv
 
 # ============================================
@@ -174,14 +173,14 @@ def get_red_packets_ref():
     return db.collection("red_packets")
 
 async def get_user_data(user_id: str) -> Optional[Dict]:
-    doc = await get_user_ref(user_id).get()
+    doc = get_user_ref(user_id).get()
     if doc.exists:
         return doc.to_dict()
     return None
 
 async def create_user_if_not_exists(user_id: str) -> Dict:
     user_ref = get_user_ref(user_id)
-    user_doc = await user_ref.get()
+    user_doc = user_ref.get()
     
     if not user_doc.exists:
         now = datetime.now(timezone.utc)
@@ -204,15 +203,15 @@ async def create_user_if_not_exists(user_id: str) -> Dict:
             "dailyLastClaim": None,
             "createdAt": now
         }
-        await user_ref.set(user_data)
+        user_ref.set(user_data)
         return user_data
     return user_doc.to_dict()
 
 async def is_admin(user_id: str) -> bool:
     if str(user_id) == SUPER_ADMIN_ID:
         return True
-    admin_data = await get_admin_ref(str(user_id)).get()
-    return admin_data.exists
+    admin_doc = get_admin_ref(str(user_id)).get()
+    return admin_doc.exists
 
 async def is_super_admin(user_id: str) -> bool:
     return str(user_id) == SUPER_ADMIN_ID
@@ -221,7 +220,7 @@ async def check_loans_overdue(user_id: str) -> Tuple[bool, List[Dict]]:
     loans_ref = db.collection("loans")
     now = datetime.now(timezone.utc)
     
-    loans = await loans_ref.where(
+    loans = loans_ref.where(
         filter=FieldFilter("borrowerId", "==", str(user_id))
     ).where(
         filter=FieldFilter("repaid", "==", False)
@@ -245,7 +244,7 @@ async def add_log(log_type: str, user_id: str, amount: int, target_id: Optional[
         "description": description,
         "timestamp": datetime.now(timezone.utc)
     }
-    await get_logs_ref().add(log_data)
+    get_logs_ref().add(log_data)
 
 async def add_transaction(transaction_type: str, user_id: str, amount: int, target_id: Optional[str] = None, description: Optional[str] = None):
     transaction_data = {
@@ -256,14 +255,14 @@ async def add_transaction(transaction_type: str, user_id: str, amount: int, targ
         "description": description,
         "timestamp": datetime.now(timezone.utc)
     }
-    await get_transactions_ref().add(transaction_data)
+    get_transactions_ref().add(transaction_data)
 
 async def update_user_stats_transaction(user_id: str, is_win: bool, bet_amount: int, win_amount: int):
     user_ref = get_user_ref(user_id)
     
     @firestore.transactional
     async def update_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = await transaction.get(user_ref)
+        user_doc = transaction.get(user_ref)
         if not user_doc.exists:
             return
         
@@ -348,8 +347,8 @@ async def transfer_money(from_id: str, to_id: str, amount: int, transaction_type
     
     @firestore.transactional
     async def transfer_in_transaction(transaction: firestore_transaction.Transaction):
-        from_doc = await transaction.get(from_ref)
-        to_doc = await transaction.get(to_ref)
+        from_doc = transaction.get(from_ref)
+        to_doc = transaction.get(to_ref)
         if not from_doc.exists or not to_doc.exists:
             raise ValueError("User not found")
         from_data = from_doc.to_dict()
@@ -375,7 +374,7 @@ async def add_money_transaction(user_id: str, amount: int, admin_id: str = "syst
     
     @firestore.transactional
     async def add_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = await transaction.get(user_ref)
+        user_doc = transaction.get(user_ref)
         if not user_doc.exists:
             raise ValueError("User not found")
         user_data = user_doc.to_dict()
@@ -396,7 +395,7 @@ async def remove_money_transaction(user_id: str, amount: int, admin_id: str = "s
     
     @firestore.transactional
     async def remove_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = await transaction.get(user_ref)
+        user_doc = transaction.get(user_ref)
         if not user_doc.exists:
             raise ValueError("User not found")
         user_data = user_doc.to_dict()
@@ -419,7 +418,7 @@ async def deduct_bet_amount(user_id: str, amount: int) -> bool:
     
     @firestore.transactional
     async def deduct_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = await transaction.get(user_ref)
+        user_doc = transaction.get(user_ref)
         if not user_doc.exists:
             raise ValueError("User not found")
         user_data = user_doc.to_dict()
@@ -440,7 +439,7 @@ async def add_win_amount(user_id: str, amount: int) -> bool:
     
     @firestore.transactional
     async def add_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = await transaction.get(user_ref)
+        user_doc = transaction.get(user_ref)
         if not user_doc.exists:
             raise ValueError("User not found")
         user_data = user_doc.to_dict()
@@ -454,6 +453,9 @@ async def add_win_amount(user_id: str, amount: int) -> bool:
         print(f"Add win error: {e}")
         return False
 
+async def refund_bet_amount(user_id: str, amount: int) -> bool:
+    return await add_win_amount(user_id, amount)
+
 async def check_and_deduct_shield(user_id: str) -> bool:
     user_ref = get_user_ref(user_id)
     user_data = await get_user_data(user_id)
@@ -461,7 +463,7 @@ async def check_and_deduct_shield(user_id: str) -> bool:
     if user_data and user_data.get("freeBetShield", 0) > 0:
         @firestore.transactional
         async def deduct_shield_in_transaction(transaction: firestore_transaction.Transaction):
-            user_doc = await transaction.get(user_ref)
+            user_doc = transaction.get(user_ref)
             if user_doc.exists:
                 user_data_tx = user_doc.to_dict()
                 if user_data_tx.get("freeBetShield", 0) > 0:
@@ -481,7 +483,7 @@ async def check_and_deduct_coupon(user_id: str) -> bool:
     if user_data and user_data.get("discountCouponUses", 0) > 0:
         @firestore.transactional
         async def deduct_coupon_in_transaction(transaction: firestore_transaction.Transaction):
-            user_doc = await transaction.get(user_ref)
+            user_doc = transaction.get(user_ref)
             if user_doc.exists:
                 user_data_tx = user_doc.to_dict()
                 if user_data_tx.get("discountCouponUses", 0) > 0:
@@ -537,7 +539,6 @@ def check_cooldown(command_name: str, cooldown_seconds: int):
         return True
     return app_commands.check(predicate)
 
-
 # ============================================
 # ECONOMY COMMANDS
 # ============================================
@@ -582,7 +583,7 @@ async def daily(interaction: discord.Interaction):
     
     success = await add_money_transaction(user_id, DAILY_REWARD)
     if success:
-        await get_user_ref(user_id).update({"dailyLastClaim": datetime.now(timezone.utc)})
+        get_user_ref(user_id).update({"dailyLastClaim": datetime.now(timezone.utc)})
         embed = create_embed(title="🎁 Điểm Danh Hàng Ngày", description=f"Bạn đã nhận được **{DAILY_REWARD:,} VNĐ**!", color=COLOR_GOLD, thumbnail_url=interaction.user.display_avatar.url, footer_text="Hẹn gặp lại vào ngày mai!")
         await interaction.response.send_message(embed=embed)
     else:
@@ -651,21 +652,29 @@ async def top(interaction: discord.Interaction):
             selected = self.values[0]
             await select_interaction.response.defer()
             
-            users = await db.collection("users").get()
+            users = db.collection("users").get()
             user_list = [doc.to_dict() for doc in users]
             
             if "Giàu nhất" in selected:
                 sorted_users = sorted(user_list, key=lambda x: x.get("balance", 0), reverse=True)
-                title, field_key, field_name, emoji = "💰 Bảng Xếp Hạng Giàu Nhất", "balance", "Số dư", "💰"
+                title = "💰 Bảng Xếp Hạng Giàu Nhất"
+                field_key = "balance"
+                is_money = True
             elif "Thắng nhiều nhất" in selected:
                 sorted_users = sorted(user_list, key=lambda x: x.get("totalMoneyWon", 0), reverse=True)
-                title, field_key, field_name, emoji = "🏆 Bảng Xếp Hạng Thắng Nhiều Nhất", "totalMoneyWon", "Tổng thắng", "🏆"
+                title = "🏆 Bảng Xếp Hạng Thắng Nhiều Nhất"
+                field_key = "totalMoneyWon"
+                is_money = True
             elif "Chuỗi thắng" in selected:
                 sorted_users = sorted(user_list, key=lambda x: x.get("bestWinStreak", 0), reverse=True)
-                title, field_key, field_name, emoji = "🔥 Bảng Xếp Hạng Chuỗi Thắng", "bestWinStreak", "Best Streak", "🔥"
+                title = "🔥 Bảng Xếp Hạng Chuỗi Thắng"
+                field_key = "bestWinStreak"
+                is_money = False
             else:
                 sorted_users = sorted(user_list, key=lambda x: x.get("totalGames", 0), reverse=True)
-                title, field_key, field_name, emoji = "🎮 Bảng Xếp Hạng Chơi Nhiều Nhất", "totalGames", "Tổng game", "🎮"
+                title = "🎮 Bảng Xếp Hạng Chơi Nhiều Nhất"
+                field_key = "totalGames"
+                is_money = False
             
             description = ""
             for i, user_data in enumerate(sorted_users[:10]):
@@ -675,11 +684,11 @@ async def top(interaction: discord.Interaction):
                 except:
                     name = user_data["userId"]
                 value = user_data.get(field_key, 0)
-                value_str = f"{value:,} VNĐ" if field_key in ["balance", "totalMoneyWon"] else f"{value}"
+                value_str = f"{value:,} VNĐ" if is_money else f"{value}"
                 medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
                 description += f"{medal} **{name}** - {value_str}\n"
             
-            embed = create_embed(title=title, description=description, color=COLOR_GOLD, footer_text=f"Top 10 người chơi")
+            embed = create_embed(title=title, description=description, color=COLOR_GOLD, footer_text="Top 10 người chơi")
             await select_interaction.message.edit(embed=embed, view=self.view)
     
     class TopView(discord.ui.View):
@@ -687,7 +696,7 @@ async def top(interaction: discord.Interaction):
             super().__init__(timeout=60)
             self.add_item(TopSelect())
     
-    users = await db.collection("users").get()
+    users = db.collection("users").get()
     user_list = [doc.to_dict() for doc in users]
     sorted_users = sorted(user_list, key=lambda x: x.get("balance", 0), reverse=True)
     
@@ -732,8 +741,8 @@ async def info(interaction: discord.Interaction, user: Optional[discord.User] = 
     badges_str = "\n".join(badges) if badges else "Chưa có huy hiệu"
     
     loans_ref = db.collection("loans")
-    borrowing = await loans_ref.where(filter=FieldFilter("borrowerId", "==", target_id)).where(filter=FieldFilter("repaid", "==", False)).get()
-    lending = await loans_ref.where(filter=FieldFilter("lenderId", "==", target_id)).where(filter=FieldFilter("repaid", "==", False)).get()
+    borrowing = loans_ref.where(filter=FieldFilter("borrowerId", "==", target_id)).where(filter=FieldFilter("repaid", "==", False)).get()
+    lending = loans_ref.where(filter=FieldFilter("lenderId", "==", target_id)).where(filter=FieldFilter("repaid", "==", False)).get()
     total_borrowing = sum(loan.to_dict().get("amount", 0) for loan in borrowing)
     total_lending = sum(loan.to_dict().get("amount", 0) for loan in lending)
     
@@ -771,7 +780,7 @@ async def rank(interaction: discord.Interaction):
     cooldown_manager.set_cooldown(user_id, "rank")
     await create_user_if_not_exists(user_id)
     
-    users = await db.collection("users").get()
+    users = db.collection("users").get()
     user_list = [doc.to_dict() for doc in users]
     
     def get_rank(key, reverse=True):
@@ -827,7 +836,7 @@ async def profilecolor(interaction: discord.Interaction):
             option = option_labels[selected]
             color_name = f"{option.emoji} {option.label}"
             
-            await get_user_ref(str(select_interaction.user.id)).update({"profileColor": color_name})
+            get_user_ref(str(select_interaction.user.id)).update({"profileColor": color_name})
             embed = create_embed(title="🎨 Đổi Màu Profile", description=f"Đã đổi màu profile thành **{color_name}**", color=PROFILE_COLORS.get(color_name, COLOR_BLUE), thumbnail_url=select_interaction.user.display_avatar.url, footer_text="Màu sẽ hiển thị trong /info")
             await select_interaction.response.send_message(embed=embed, ephemeral=True)
     
@@ -860,17 +869,17 @@ async def shop(interaction: discord.Interaction):
                 await button_interaction.response.send_message("❌ Đây không phải shop của bạn!", ephemeral=True)
                 return
             
-            user_id = str(button_interaction.user.id)
-            user_data = await get_user_data(user_id)
+            user_id_btn = str(button_interaction.user.id)
+            user_data_btn = await get_user_data(user_id_btn)
             
-            if user_data["balance"] < self.price:
+            if user_data_btn["balance"] < self.price:
                 await button_interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.price:,} VNĐ", ephemeral=True)
                 return
             
             @firestore.transactional
             async def buy_in_transaction(transaction: firestore_transaction.Transaction):
-                user_ref = get_user_ref(user_id)
-                user_doc = await transaction.get(user_ref)
+                user_ref = get_user_ref(user_id_btn)
+                user_doc = transaction.get(user_ref)
                 if not user_doc.exists:
                     raise ValueError("User not found")
                 user_data_tx = user_doc.to_dict()
@@ -891,8 +900,8 @@ async def shop(interaction: discord.Interaction):
             
             try:
                 msg = buy_in_transaction(db.transaction())
-                await add_log("shop", user_id, self.price, description=self.item_name)
-                await add_transaction("shop", user_id, -self.price, description=self.item_name)
+                await add_log("shop", user_id_btn, self.price, description=self.item_name)
+                await add_transaction("shop", user_id_btn, -self.price, description=self.item_name)
                 await button_interaction.response.send_message(msg, ephemeral=True)
             except Exception as e:
                 await button_interaction.response.send_message(f"❌ Lỗi: {str(e)}", ephemeral=True)
@@ -937,7 +946,6 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
     await create_user_if_not_exists(user_id)
     await create_user_if_not_exists(target_id)
     
-    # Check if lender has enough money
     lender_data = await get_user_data(target_id)
     if lender_data["balance"] < amount:
         await interaction.response.send_message(f"❌ {user.name} không đủ tiền để cho vay!", ephemeral=True)
@@ -955,24 +963,20 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
             
             await button_interaction.response.defer()
             
-            # Create loan
             now = datetime.now(timezone.utc)
             due_at = now + timedelta(days=LOAN_DUE_DAYS)
             
-            loan_data = {
-                "borrowerId": user_id,
-                "lenderId": target_id,
-                "amount": amount,
-                "createdAt": now,
-                "dueAt": due_at,
-                "repaid": False
-            }
-            
-            # Transfer money
             success = await transfer_money(target_id, user_id, amount, "loan")
             
             if success:
-                loan_ref = await db.collection("loans").add(loan_data)
+                loan_ref = db.collection("loans").add({
+                    "borrowerId": user_id,
+                    "lenderId": target_id,
+                    "amount": amount,
+                    "createdAt": now,
+                    "dueAt": due_at,
+                    "repaid": False
+                })
                 loan_id = loan_ref[1].id
                 
                 embed = create_embed(
@@ -1003,9 +1007,7 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
         title="💳 Yêu Cầu Vay Tiền",
         description=f"**{interaction.user.name}** muốn vay **{amount:,} VNĐ** từ **{user.name}**",
         color=COLOR_WARNING,
-        fields=[
-            ("⏰ Hết hạn", "60 giây", False)
-        ],
+        fields=[("⏰ Hết hạn", "60 giây", False)],
         thumbnail_url=interaction.user.display_avatar.url,
         footer_text=f"Người cho vay: {user.name}"
     )
@@ -1020,7 +1022,7 @@ async def tra(interaction: discord.Interaction, loan_id: str):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "tra")
     
-    loan_doc = await get_loan_ref(loan_id).get()
+    loan_doc = get_loan_ref(loan_id).get()
     if not loan_doc.exists:
         await interaction.response.send_message("❌ Khoản vay không tồn tại!", ephemeral=True)
         return
@@ -1040,12 +1042,10 @@ async def tra(interaction: discord.Interaction, loan_id: str):
         await interaction.response.send_message(f"❌ Số dư không đủ! Cần {loan_data['amount']:,} VNĐ", ephemeral=True)
         return
     
-    # Transfer money back
     success = await transfer_money(user_id, loan_data["lenderId"], loan_data["amount"], "repay")
     
     if success:
-        await get_loan_ref(loan_id).update({"repaid": True})
-        
+        get_loan_ref(loan_id).update({"repaid": True})
         embed = create_embed(
             title="✅ Trả Nợ Thành Công",
             description=f"Đã trả **{loan_data['amount']:,} VNĐ** cho người cho vay!",
@@ -1063,9 +1063,8 @@ async def nolist(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "nolist")
     
-    # Get all loans related to user
-    loans_as_borrower = await db.collection("loans").where(filter=FieldFilter("borrowerId", "==", user_id)).get()
-    loans_as_lender = await db.collection("loans").where(filter=FieldFilter("lenderId", "==", user_id)).get()
+    loans_as_borrower = db.collection("loans").where(filter=FieldFilter("borrowerId", "==", user_id)).get()
+    loans_as_lender = db.collection("loans").where(filter=FieldFilter("lenderId", "==", user_id)).get()
     
     all_loans = list(loans_as_borrower) + list(loans_as_lender)
     
@@ -1110,7 +1109,7 @@ async def nolist(interaction: discord.Interaction):
         description += f"📅 Hạn trả: **{due_str}**\n"
         description += f"📊 Trạng thái: {status}\n\n"
     
-    embed = create_embed(title="📋 Danh Sách Nợ", description=description, color=COLOR_WARNING, footer_text=f"Dùng /tra <loan_id> để trả nợ")
+    embed = create_embed(title="📋 Danh Sách Nợ", description=description, color=COLOR_WARNING, footer_text="Dùng /tra <loan_id> để trả nợ")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="anxin", description="🙏 Xin tiền người chơi khác")
@@ -1132,7 +1131,6 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
     await create_user_if_not_exists(user_id)
     await create_user_if_not_exists(target_id)
     
-    # Check if target has enough
     target_data = await get_user_data(target_id)
     if target_data["balance"] < amount:
         await interaction.response.send_message(f"❌ {user.name} không đủ tiền để cho!", ephemeral=True)
@@ -1177,7 +1175,6 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
     cooldown_manager.set_cooldown(user_id, "anxin")
     await interaction.response.send_message(embed=embed, view=XinView())
 
-
 # ============================================
 # TAI XIU GAME
 # ============================================
@@ -1190,7 +1187,6 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     
     user_data = await create_user_if_not_exists(user_id)
     
-    # Parse bet amount
     if cuoc.lower() == "all":
         bet_amount = user_data["balance"]
     else:
@@ -1207,7 +1203,6 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         await interaction.response.send_message("❌ Số dư không đủ!", ephemeral=True)
         return
     
-    # Parse bet type
     cua_lower = cua.lower()
     is_specific = False
     specific_number = 0
@@ -1233,32 +1228,22 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
             await interaction.response.send_message("❌ Cửa cược không hợp lệ! (tai/xiu/chan/le hoặc 3-18)", ephemeral=True)
             return
     
-    # Deduct bet
     success = await deduct_bet_amount(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    # Roll dice animation
     dice1, dice2, dice3 = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
     total = dice1 + dice2 + dice3
     
     dice_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
     
-    # Send initial message
-    embed = create_embed(
-        title="🎲 Tài Xỉu",
-        description="Đang lắc xúc xắc...",
-        color=COLOR_GOLD,
-        fields=[("Xúc xắc", "? ? ?", False)]
-    )
+    embed = create_embed(title="🎲 Tài Xỉu", description="Đang lắc xúc xắc...", color=COLOR_GOLD, fields=[("Xúc xắc", "? ? ?", False)])
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     
-    # Animation
     for i in range(3):
         await asyncio.sleep(0.8)
-        shown_dice = [random.choice(list(dice_emojis.values())) for _ in range(3)]
         if i == 0:
             desc = f"{dice_emojis[dice1]} ? ?"
         elif i == 1:
@@ -1266,14 +1251,9 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         else:
             desc = f"{dice_emojis[dice1]} {dice_emojis[dice2]} {dice_emojis[dice3]}"
         
-        embed = create_embed(
-            title="🎲 Tài Xỉu",
-            description=f"**Xúc xắc:** {desc}\n\n🎲 Tổng điểm: **{total}**",
-            color=COLOR_GOLD
-        )
+        embed = create_embed(title="🎲 Tài Xỉu", description=f"**Xúc xắc:** {desc}\n\n🎲 Tổng điểm: **{total}**", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
-    # Determine result
     is_tai = 11 <= total <= 17
     is_xiu = 4 <= total <= 10
     is_chan = total % 2 == 0
@@ -1291,14 +1271,10 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         if is_tai and not is_triple:
             multiplier = 2
             win = True
-        elif is_triple:
-            win = False  # Triple loses for tai/xiu
     elif bet_type == "xiu":
         if is_xiu and not is_triple:
             multiplier = 2
             win = True
-        elif is_triple:
-            win = False
     elif bet_type == "chan":
         if is_chan:
             multiplier = 2
@@ -1308,7 +1284,6 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
             multiplier = 2
             win = True
     
-    # Determine tai/xiu text
     if is_triple:
         tai_xiu_text = "⚠️ BỘ BA"
     elif is_tai:
@@ -1318,12 +1293,11 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     
     chan_le_text = f"{EMOJI_CHAN} CHẴN" if is_chan else f"{EMOJI_LE} LẺ"
     
-    # Check shield
     if not win:
         has_shield = await check_and_deduct_shield(user_id)
         if has_shield:
             await refund_bet_amount(user_id, bet_amount)
-            result_text = f"🛡️ **Phiếu Miễn Cược** đã bảo vệ bạn! Tiền cược được hoàn trả."
+            result_text = "🛡️ **Phiếu Miễn Cược** đã bảo vệ bạn! Tiền cược được hoàn trả."
             await update_user_stats_transaction(user_id, False, bet_amount, 0)
         else:
             result_text = "😢 Bạn đã thua!"
@@ -1334,8 +1308,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         result_text = f"🎉 Bạn đã thắng **{win_amount:,} VNĐ**! (x{multiplier})"
         await update_user_stats_transaction(user_id, True, bet_amount, win_amount)
     
-    # Save game history
-    await get_game_history_ref().add({
+    get_game_history_ref().add({
         "result": total,
         "dice1": dice1,
         "dice2": dice2,
@@ -1349,13 +1322,9 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         "userId": user_id
     })
     
-    # Final embed
     embed = create_embed(
         title="🎲 Kết Quả Tài Xỉu",
-        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n"
-                   f"📊 Tổng điểm: **{total}**\n"
-                   f"🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n"
-                   f"{result_text}",
+        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n📊 Tổng điểm: **{total}**\n🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n{result_text}",
         color=COLOR_SUCCESS if win else COLOR_ERROR
     )
     await msg.edit(embed=embed)
@@ -1389,38 +1358,29 @@ async def coinflip(interaction: discord.Interaction, choice: str, amount: str):
         return
     
     choice_lower = choice.lower()
-    if choice_lower not in ["head", "tail", "mặt sấp", "mặt ngửa"]:
-        await interaction.response.send_message("❌ Chọn head hoặc tail!", ephemeral=True)
-        return
-    
     if choice_lower in ["mặt sấp"]:
         choice_lower = "tail"
     elif choice_lower in ["mặt ngửa"]:
         choice_lower = "head"
+    
+    if choice_lower not in ["head", "tail"]:
+        await interaction.response.send_message("❌ Chọn head hoặc tail!", ephemeral=True)
+        return
     
     success = await deduct_bet_amount(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    # Send animation
     embed = create_embed(title="🪙 CoinFlip", description="Đang tung đồng xu...", color=COLOR_GOLD)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     
-    # Animation frames
-    frames = [
-        "🪙 Đang quay...",
-        "🪙 Đang quay...",
-        "🪙 Đang quay..."
-    ]
-    
-    for frame in frames:
+    for _ in range(3):
         await asyncio.sleep(0.5)
-        embed = create_embed(title="🪙 CoinFlip", description=frame, color=COLOR_GOLD)
+        embed = create_embed(title="🪙 CoinFlip", description="🪙 Đang quay...", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
-    # Result
     result = random.choice(["head", "tail"])
     result_emoji = "🪙 Mặt Ngửa (Head)" if result == "head" else "🪙 Mặt Sấp (Tail)"
     
@@ -1443,11 +1403,7 @@ async def coinflip(interaction: discord.Interaction, choice: str, amount: str):
             await update_user_stats_transaction(user_id, False, bet_amount, 0)
         color = COLOR_ERROR
     
-    embed = create_embed(
-        title="🪙 Kết Quả CoinFlip",
-        description=f"**Kết quả:** {result_emoji}\n\n{result_text}",
-        color=color
-    )
+    embed = create_embed(title="🪙 Kết Quả CoinFlip", description=f"**Kết quả:** {result_emoji}\n\n{result_text}", color=color)
     await msg.edit(embed=embed)
 
 # ============================================
@@ -1483,15 +1439,12 @@ async def slot(interaction: discord.Interaction, amount: str):
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    # Generate result
     reels = [[random.choice(SLOT_SYMBOLS) for _ in range(3)] for _ in range(3)]
     
-    # Send initial
     embed = create_embed(title="🎰 Slot Machine", description="Đang quay...", color=COLOR_GOLD)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     
-    # Animation
     for i in range(4):
         await asyncio.sleep(0.6)
         display = ""
@@ -1505,27 +1458,15 @@ async def slot(interaction: discord.Interaction, amount: str):
         embed = create_embed(title="🎰 Slot Machine", description=f"```\n{display}```", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
-    # Check result (middle row)
     middle_row = reels[1]
     row_str = "".join(middle_row)
     
     win = False
     multiplier = 0
     
-    # Check for exact matches
-    if row_str == "💎💎💎":
-        multiplier = SLOT_PAYOUTS["💎💎💎"]
+    if row_str in SLOT_PAYOUTS:
+        multiplier = SLOT_PAYOUTS[row_str]
         win = True
-    elif row_str == "⭐⭐⭐":
-        multiplier = SLOT_PAYOUTS["⭐⭐⭐"]
-        win = True
-    elif row_str == "🍒🍒🍒":
-        multiplier = SLOT_PAYOUTS["🍒🍒🍒"]
-        win = True
-    elif row_str == "🍋🍋🍋":
-        multiplier = SLOT_PAYOUTS["🍋🍋🍋"]
-        win = True
-    # Check for 2 matching
     elif middle_row[0] == middle_row[1] or middle_row[1] == middle_row[2] or middle_row[0] == middle_row[2]:
         multiplier = 1.5
         win = True
@@ -1547,16 +1488,11 @@ async def slot(interaction: discord.Interaction, amount: str):
             await update_user_stats_transaction(user_id, False, bet_amount, 0)
         color = COLOR_ERROR
     
-    # Final display
     final_display = ""
     for row in reels:
         final_display += " ".join(row) + "\n"
     
-    embed = create_embed(
-        title="🎰 Kết Quả Slot",
-        description=f"```\n{final_display}```\n\n{result_text}",
-        color=color
-    )
+    embed = create_embed(title="🎰 Kết Quả Slot", description=f"```\n{final_display}```\n\n{result_text}", color=color)
     await msg.edit(embed=embed)
 
 # ============================================
@@ -1579,25 +1515,21 @@ async def choilodit(interaction: discord.Interaction, user: discord.User):
     await create_user_if_not_exists(user_id)
     await create_user_if_not_exists(target_id)
     
-    # Check coupon
     has_coupon = await check_and_deduct_coupon(user_id)
     price = 50000 if has_coupon else 100000
     
-    # Check balance
     user_data = await get_user_data(user_id)
     if user_data["balance"] < price:
         await interaction.response.send_message(f"❌ Số dư không đủ! Cần {price:,} VNĐ", ephemeral=True)
         return
     
-    # Transfer money
     success = await transfer_money(user_id, target_id, price, "lodit")
     
     if success:
         coupon_text = " (đã dùng phiếu giảm giá 50%)" if has_coupon else ""
         embed = create_embed(
             title="🎯 Chơi Lỗ Đít",
-            description=f"**{interaction.user.name}** đã chơi lỗ đít của **{user.name}**{coupon_text}\n\n"
-                       f"💸 Tiền chuyển: **{price:,} VNĐ**",
+            description=f"**{interaction.user.name}** đã chơi lỗ đít của **{user.name}**{coupon_text}\n\n💸 Tiền chuyển: **{price:,} VNĐ**",
             color=COLOR_SUCCESS,
             thumbnail_url=user.display_avatar.url
         )
@@ -1606,7 +1538,7 @@ async def choilodit(interaction: discord.Interaction, user: discord.User):
     else:
         await interaction.response.send_message("❌ Có lỗi xảy ra!", ephemeral=True)
 
-  # ============================================
+# ============================================
 # ADMIN COMMANDS
 # ============================================
 @bot.tree.command(name="addadmin", description="👑 Thêm admin (Chỉ Super Admin)")
@@ -1617,21 +1549,15 @@ async def addadmin(interaction: discord.Interaction, user: discord.User):
         return
     
     target_id = str(user.id)
-    admin_ref = get_admin_ref(target_id)
-    admin_doc = await admin_ref.get()
+    admin_doc = get_admin_ref(target_id).get()
     
     if admin_doc.exists:
         await interaction.response.send_message(f"❌ {user.name} đã là admin!", ephemeral=True)
         return
     
-    await admin_ref.set({"userId": target_id, "role": "mini"})
+    get_admin_ref(target_id).set({"userId": target_id, "role": "mini"})
     
-    embed = create_embed(
-        title="👑 Thêm Admin",
-        description=f"Đã thêm **{user.name}** làm **Mini Admin**!",
-        color=COLOR_GOLD,
-        thumbnail_url=user.display_avatar.url
-    )
+    embed = create_embed(title="👑 Thêm Admin", description=f"Đã thêm **{user.name}** làm **Mini Admin**!", color=COLOR_GOLD, thumbnail_url=user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="removeadmin", description="👑 Xóa admin (Chỉ Super Admin)")
@@ -1642,21 +1568,15 @@ async def removeadmin(interaction: discord.Interaction, user: discord.User):
         return
     
     target_id = str(user.id)
-    admin_ref = get_admin_ref(target_id)
-    admin_doc = await admin_ref.get()
+    admin_doc = get_admin_ref(target_id).get()
     
     if not admin_doc.exists:
         await interaction.response.send_message(f"❌ {user.name} không phải là admin!", ephemeral=True)
         return
     
-    await admin_ref.delete()
+    get_admin_ref(target_id).delete()
     
-    embed = create_embed(
-        title="👑 Xóa Admin",
-        description=f"Đã xóa **{user.name}** khỏi admin!",
-        color=COLOR_RED,
-        thumbnail_url=user.display_avatar.url
-    )
+    embed = create_embed(title="👑 Xóa Admin", description=f"Đã xóa **{user.name}** khỏi admin!", color=COLOR_RED, thumbnail_url=user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="addmoney", description="💰 Thêm tiền cho người chơi (Admin)")
@@ -1676,12 +1596,7 @@ async def addmoney(interaction: discord.Interaction, user: discord.User, amount:
     success = await add_money_transaction(target_id, amount, str(interaction.user.id))
     
     if success:
-        embed = create_embed(
-            title="💰 Thêm Tiền",
-            description=f"Đã thêm **{amount:,} VNĐ** cho **{user.name}**!",
-            color=COLOR_SUCCESS,
-            thumbnail_url=user.display_avatar.url
-        )
+        embed = create_embed(title="💰 Thêm Tiền", description=f"Đã thêm **{amount:,} VNĐ** cho **{user.name}**!", color=COLOR_SUCCESS, thumbnail_url=user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Có lỗi xảy ra!", ephemeral=True)
@@ -1703,12 +1618,7 @@ async def trutien(interaction: discord.Interaction, user: discord.User, amount: 
     success = await remove_money_transaction(target_id, amount, str(interaction.user.id))
     
     if success:
-        embed = create_embed(
-            title="💸 Trừ Tiền",
-            description=f"Đã trừ **{amount:,} VNĐ** từ **{user.name}**!",
-            color=COLOR_WARNING,
-            thumbnail_url=user.display_avatar.url
-        )
+        embed = create_embed(title="💸 Trừ Tiền", description=f"Đã trừ **{amount:,} VNĐ** từ **{user.name}**!", color=COLOR_WARNING, thumbnail_url=user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Số dư không đủ hoặc có lỗi!", ephemeral=True)
@@ -1731,32 +1641,26 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
         
         @discord.ui.button(label="Nhận Lì Xì", style=discord.ButtonStyle.success, emoji="🧧")
         async def claim(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-            user_id = str(button_interaction.user.id)
+            user_id_btn = str(button_interaction.user.id)
             
-            if user_id in self.claimed:
+            if user_id_btn in self.claimed:
                 await button_interaction.response.send_message("❌ Bạn đã nhận lì xì rồi!", ephemeral=True)
                 return
             
-            await create_user_if_not_exists(user_id)
-            await add_money_transaction(user_id, amount, str(interaction.user.id))
-            self.claimed.add(user_id)
+            await create_user_if_not_exists(user_id_btn)
+            await add_money_transaction(user_id_btn, amount, str(interaction.user.id))
+            self.claimed.add(user_id_btn)
             
-            await button_interaction.response.send_message(
-                f"🧧 Bạn đã nhận **{amount:,} VNĐ**! Chúc mừng năm mới! 🎉",
-                ephemeral=True
-            )
+            await button_interaction.response.send_message(f"🧧 Bạn đã nhận **{amount:,} VNĐ**! Chúc mừng năm mới! 🎉", ephemeral=True)
     
     embed = create_embed(
         title="🧧 LÌ XÌ MAY MẮN",
-        description=f"{EMOJI_RED_ENVELOPE} **{interaction.user.name}** đã phát lì xì!\n\n"
-                   f"💰 Giá trị: **{amount:,} VNĐ**\n\n"
-                   f"{EMOJI_PARTY} Nhấn nút bên dưới để nhận!",
+        description=f"{EMOJI_RED_ENVELOPE} **{interaction.user.name}** đã phát lì xì!\n\n💰 Giá trị: **{amount:,} VNĐ**\n\n{EMOJI_PARTY} Nhấn nút bên dưới để nhận!",
         color=COLOR_GOLD,
         thumbnail_url=interaction.user.display_avatar.url,
         footer_text="Mỗi người chỉ được nhận 1 lần"
     )
     
-    # Animation messages
     await interaction.response.send_message("🧧 Đang chuẩn bị lì xì...")
     await asyncio.sleep(0.5)
     msg = await interaction.original_response()
@@ -1775,7 +1679,7 @@ async def lichsu(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "lichsu")
     
-    transactions = await get_transactions_ref().where(
+    transactions = get_transactions_ref().where(
         filter=FieldFilter("userId", "==", user_id)
     ).order_by("timestamp", direction=firestore.Query.DESCENDING).limit(10).get()
     
@@ -1794,27 +1698,8 @@ async def lichsu(interaction: discord.Interaction):
         
         time_str = timestamp.strftime("%d/%m/%Y %H:%M") if isinstance(timestamp, datetime) else "N/A"
         
-        type_emoji = {
-            "transfer": "💸",
-            "loan": "💳",
-            "repay": "✅",
-            "addmoney": "💰",
-            "trutien": "📉",
-            "shop": "🛒",
-            "lodit": "🎯",
-            "anxin": "🙏"
-        }.get(trans_type, "📄")
-        
-        type_name = {
-            "transfer": "Chuyển tiền",
-            "loan": "Vay tiền",
-            "repay": "Trả nợ",
-            "addmoney": "Nhận tiền",
-            "trutien": "Trừ tiền",
-            "shop": "Mua hàng",
-            "lodit": "Chơi lỗ đít",
-            "anxin": "Xin tiền"
-        }.get(trans_type, trans_type)
+        type_emoji = {"transfer": "💸", "loan": "💳", "repay": "✅", "addmoney": "💰", "trutien": "📉", "shop": "🛒", "lodit": "🎯", "anxin": "🙏"}.get(trans_type, "📄")
+        type_name = {"transfer": "Chuyển tiền", "loan": "Vay tiền", "repay": "Trả nợ", "addmoney": "Nhận tiền", "trutien": "Trừ tiền", "shop": "Mua hàng", "lodit": "Chơi lỗ đít", "anxin": "Xin tiền"}.get(trans_type, trans_type)
         
         target_text = ""
         if target_id:
@@ -1825,16 +1710,9 @@ async def lichsu(interaction: discord.Interaction):
                 pass
         
         sign = "+" if amount > 0 and trans_type not in ["trutien", "shop"] else ""
-        description += f"{type_emoji} **{type_name}**: {sign}{amount:,} VNĐ{target_text}\n"
-        description += f"└ 📅 {time_str}\n\n"
+        description += f"{type_emoji} **{type_name}**: {sign}{amount:,} VNĐ{target_text}\n└ 📅 {time_str}\n\n"
     
-    embed = create_embed(
-        title="📋 Lịch Sử Giao Dịch",
-        description=description,
-        color=COLOR_INFO,
-        thumbnail_url=interaction.user.display_avatar.url,
-        footer_text=f"Người chơi: {interaction.user.name}"
-    )
+    embed = create_embed(title="📋 Lịch Sử Giao Dịch", description=description, color=COLOR_INFO, thumbnail_url=interaction.user.display_avatar.url, footer_text=f"Người chơi: {interaction.user.name}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ============================================
@@ -1846,28 +1724,20 @@ async def doan(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "doan")
     
-    # Get last 20 games
-    games = await get_game_history_ref().order_by(
-        "createdAt", direction=firestore.Query.DESCENDING
-    ).limit(20).get()
-    
+    games = get_game_history_ref().order_by("createdAt", direction=firestore.Query.DESCENDING).limit(20).get()
     game_list = [doc.to_dict() for doc in games]
     
     if len(game_list) < 5:
         await interaction.response.send_message("🤖 Cần ít nhất 5 ván gần nhất để dự đoán!", ephemeral=True)
         return
     
-    # Analyze
     tai_count = sum(1 for g in game_list if g.get("taiOrXiu") == "tai")
     xiu_count = sum(1 for g in game_list if g.get("taiOrXiu") == "xiu")
     
     total = tai_count + xiu_count
     tai_percent = (tai_count / total * 100) if total > 0 else 50
-    
-    # Calculate confidence (50-65%)
     confidence = 50 + random.randint(0, 15)
     
-    # Predict based on trend
     if tai_count > xiu_count:
         prediction = f"{EMOJI_TAI} TÀI"
         pred_reason = "Xu hướng đang nghiêng về Tài"
@@ -1880,10 +1750,7 @@ async def doan(interaction: discord.Interaction):
     
     embed = create_embed(
         title="🤖 AI Predictor",
-        description=f"**Dự đoán dựa trên {total} ván gần nhất**\n\n"
-                   f"📊 Độ tin cậy: **{confidence}%**\n\n"
-                   f"🎯 Dự đoán: **{prediction}**\n"
-                   f"📝 Lý do: {pred_reason}",
+        description=f"**Dự đoán dựa trên {total} ván gần nhất**\n\n📊 Độ tin cậy: **{confidence}%**\n\n🎯 Dự đoán: **{prediction}**\n📝 Lý do: {pred_reason}",
         color=COLOR_INFO,
         fields=[
             (f"{EMOJI_TAI} Tài gần đây", f"{tai_count}/{total} ({tai_percent:.0f}%)", True),
@@ -1902,7 +1769,6 @@ async def phantich(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "phantich")
     
-    # Animation
     await interaction.response.send_message("⏳ Đang thu thập dữ liệu...")
     msg = await interaction.original_response()
     await asyncio.sleep(0.8)
@@ -1913,23 +1779,17 @@ async def phantich(interaction: discord.Interaction):
     await msg.edit(content="🎯 Đang dự đoán...")
     await asyncio.sleep(0.8)
     
-    # Get last 20 games
-    games = await get_game_history_ref().order_by(
-        "createdAt", direction=firestore.Query.DESCENDING
-    ).limit(20).get()
-    
+    games = get_game_history_ref().order_by("createdAt", direction=firestore.Query.DESCENDING).limit(20).get()
     game_list = [doc.to_dict() for doc in games]
     
     if len(game_list) < 5:
         await msg.edit(content="❌ Cần ít nhất 5 ván gần nhất để phân tích!")
         return
     
-    # Analyze
     tai_count = sum(1 for g in game_list if g.get("taiOrXiu") == "tai")
     xiu_count = sum(1 for g in game_list if g.get("taiOrXiu") == "xiu")
     total = tai_count + xiu_count
     
-    # Current streak
     current_streak = 0
     streak_type = None
     for g in game_list:
@@ -1945,7 +1805,6 @@ async def phantich(interaction: discord.Interaction):
     
     streak_text = f"{current_streak} ván {streak_type} liên tiếp" if streak_type else "Không có"
     
-    # Prediction
     confidence = 50 + min(len(game_list), 29)
     if tai_count > xiu_count:
         prediction = f"{EMOJI_TAI} TÀI"
@@ -1958,12 +1817,7 @@ async def phantich(interaction: discord.Interaction):
     
     embed = create_embed(
         title="📊 Phân Tích Tài Xỉu",
-        description=f"**20 ván gần nhất**\n\n"
-                   f"{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n"
-                   f"{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n"
-                   f"🔥 Chuỗi hiện tại: **{streak_text}**\n"
-                   f"🎯 Độ tin cậy: **{confidence}%**\n\n"
-                   f"🔮 Dự đoán: **{prediction}**",
+        description=f"**20 ván gần nhất**\n\n{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n🔥 Chuỗi hiện tại: **{streak_text}**\n🎯 Độ tin cậy: **{confidence}%**\n\n🔮 Dự đoán: **{prediction}**",
         color=COLOR_INFO,
         footer_text="⚠️ Dự đoán chỉ mang tính tham khảo"
     )
@@ -1977,7 +1831,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if isinstance(error, app_commands.errors.CommandOnCooldown):
         await interaction.response.send_message(f"⏰ Vui lòng đợi {error.retry_after:.0f} giây!", ephemeral=True)
     elif isinstance(error, app_commands.errors.CheckFailure):
-        pass  # Already handled in check function
+        pass
     else:
         print(f"Command error: {error}")
         try:
@@ -1989,7 +1843,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # HTTP SERVER FOR RENDER HEALTH CHECK
 # ============================================
 async def health_check(request):
-    """Health check endpoint for Render"""
     return web.Response(
         text=json.dumps({
             "status": "online",
@@ -2002,67 +1855,12 @@ async def health_check(request):
     )
 
 async def dashboard(request):
-    """Simple dashboard page"""
     return web.Response(
-        text=f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Discord Casino Bot</title>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    min-height: 100vh;
-                    margin: 0;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }}
-                .container {{
-                    text-align: center;
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 40px;
-                    border-radius: 20px;
-                    backdrop-filter: blur(10px);
-                }}
-                .status {{
-                    color: #4ade80;
-                    font-size: 24px;
-                    margin: 20px 0;
-                }}
-                .info {{
-                    color: #e2e8f0;
-                    font-size: 18px;
-                    margin: 10px 0;
-                }}
-                .emoji {{
-                    font-size: 48px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="emoji">🎰</div>
-                <h1>Discord Casino Bot</h1>
-                <div class="status">🟢 Bot is Online</div>
-                <div class="info">🤖 Bot: {str(bot.user) if bot.user else "Loading..."}</div>
-                <div class="info">📡 Servers: {len(bot.guilds)}</div>
-                <div class="info">⏱️ Latency: {f"{bot.latency * 1000:.2f}ms" if bot.ws else "N/A"}</div>
-                <div class="info">🕒 Uptime: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div>
-                <p style="margin-top: 30px; opacity: 0.7;">Made with ❤️ for Discord</p>
-            </div>
-        </body>
-        </html>
-        """,
+        text=f"""<!DOCTYPE html><html><head><title>Discord Casino Bot</title><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{{font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;}}.container{{text-align:center;background:rgba(255,255,255,0.1);padding:40px;border-radius:20px;backdrop-filter:blur(10px);}}.status{{color:#4ade80;font-size:24px;margin:20px 0;}}.info{{color:#e2e8f0;font-size:18px;margin:10px 0;}}.emoji{{font-size:48px;}}</style></head><body><div class="container"><div class="emoji">🎰</div><h1>Discord Casino Bot</h1><div class="status">🟢 Bot is Online</div><div class="info">🤖 Bot: {str(bot.user) if bot.user else "Loading..."}</div><div class="info">📡 Servers: {len(bot.guilds)}</div><div class="info">⏱️ Latency: {f"{bot.latency * 1000:.2f}ms" if bot.ws else "N/A"}</div><div class="info">🕒 Uptime: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div><p style="margin-top:30px;opacity:0.7;">Made with ❤️ for Discord</p></div></body></html>""",
         content_type="text/html"
     )
 
 async def start_web_server():
-    """Start aiohttp web server in the same event loop"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', dashboard)
@@ -2077,7 +1875,7 @@ async def start_web_server():
     print(f"🌐 Web server started on port {port}")
 
 # ============================================
-# RUN BOT + WEB SERVER (SAME EVENT LOOP)
+# RUN BOT + WEB SERVER
 # ============================================
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
@@ -2089,12 +1887,10 @@ if __name__ == "__main__":
     print(f"🔥 Firebase Firestore connected")
     print(f"🌐 Web server mode: Render Web Service")
     
-    # Start web server using bot's event loop
     @bot.event
     async def setup_hook():
         await start_web_server()
     
-    # Run Discord bot (blocking)
     try:
         bot.run(DISCORD_TOKEN)
     except discord.LoginFailure:
