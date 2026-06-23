@@ -1,8 +1,9 @@
-# render.yaml
 services:
-  - type: worker
-    name: discord-economy-bot
+  - type: web
+    name: discord-casino-bot
     env: python
+    region: singapore
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
@@ -12,3 +13,7 @@ services:
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT
         sync: false
+      - key: PORT
+        value: "8080"
+    healthCheckPath: /health
+    autoDeploy: true
