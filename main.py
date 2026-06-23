@@ -16,7 +16,6 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1 import Client as FirestoreClient
 from google.cloud.firestore_v1.base_query import FieldFilter
-import google.cloud.firestore_v1.transaction as firestore_transaction
 from aiohttp import web
 from dotenv import load_dotenv
 
@@ -204,6 +203,7 @@ async def create_user_if_not_exists(user_id: str) -> Dict:
             "createdAt": now
         }
         user_ref.set(user_data)
+        print(f"✅ Created new user: {user_id}")
         return user_data
     return user_doc.to_dict()
 
@@ -257,41 +257,37 @@ async def add_transaction(transaction_type: str, user_id: str, amount: int, targ
     }
     get_transactions_ref().add(transaction_data)
 
-async def update_user_stats_transaction(user_id: str, is_win: bool, bet_amount: int, win_amount: int):
+async def update_user_stats(user_id: str, is_win: bool, bet_amount: int, win_amount: int):
+    """Update user stats directly"""
     user_ref = get_user_ref(user_id)
+    user_doc = user_ref.get()
     
-    @firestore.transactional
-    async def update_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = transaction.get(user_ref)
-        if not user_doc.exists:
-            return
-        
-        user_data = user_doc.to_dict()
-        user_data["totalGames"] = user_data.get("totalGames", 0) + 1
-        
-        if is_win:
-            user_data["totalWins"] = user_data.get("totalWins", 0) + 1
-            user_data["currentWinStreak"] = user_data.get("currentWinStreak", 0) + 1
-            user_data["currentLoseStreak"] = 0
-            if user_data["currentWinStreak"] > user_data.get("bestWinStreak", 0):
-                user_data["bestWinStreak"] = user_data["currentWinStreak"]
-            if win_amount > user_data.get("biggestWin", 0):
-                user_data["biggestWin"] = win_amount
-            user_data["totalMoneyWon"] = user_data.get("totalMoneyWon", 0) + win_amount
-        else:
-            user_data["totalLosses"] = user_data.get("totalLosses", 0) + 1
-            user_data["currentLoseStreak"] = user_data.get("currentLoseStreak", 0) + 1
-            user_data["currentWinStreak"] = 0
-            if bet_amount > user_data.get("biggestLoss", 0):
-                user_data["biggestLoss"] = bet_amount
-            user_data["totalMoneyLost"] = user_data.get("totalMoneyLost", 0) + bet_amount
-        
-        transaction.update(user_ref, user_data)
+    if not user_doc.exists:
+        print(f"❌ User {user_id} not found for stats update")
+        return
     
-    try:
-        update_in_transaction(db.transaction())
-    except Exception as e:
-        print(f"Error updating user stats: {e}")
+    user_data = user_doc.to_dict()
+    user_data["totalGames"] = user_data.get("totalGames", 0) + 1
+    
+    if is_win:
+        user_data["totalWins"] = user_data.get("totalWins", 0) + 1
+        user_data["currentWinStreak"] = user_data.get("currentWinStreak", 0) + 1
+        user_data["currentLoseStreak"] = 0
+        if user_data["currentWinStreak"] > user_data.get("bestWinStreak", 0):
+            user_data["bestWinStreak"] = user_data["currentWinStreak"]
+        if win_amount > user_data.get("biggestWin", 0):
+            user_data["biggestWin"] = win_amount
+        user_data["totalMoneyWon"] = user_data.get("totalMoneyWon", 0) + win_amount
+    else:
+        user_data["totalLosses"] = user_data.get("totalLosses", 0) + 1
+        user_data["currentLoseStreak"] = user_data.get("currentLoseStreak", 0) + 1
+        user_data["currentWinStreak"] = 0
+        if bet_amount > user_data.get("biggestLoss", 0):
+            user_data["biggestLoss"] = bet_amount
+        user_data["totalMoneyLost"] = user_data.get("totalMoneyLost", 0) + bet_amount
+    
+    user_ref.set(user_data)
+    print(f"📊 Stats updated: games={user_data['totalGames']}, wins={user_data['totalWins']}, losses={user_data['totalLosses']}")
 
 # ============================================
 # COOLDOWN MANAGER
@@ -342,158 +338,145 @@ def create_embed(title: str, description: str = "", color: int = COLOR_PRIMARY, 
     return embed
 
 async def transfer_money(from_id: str, to_id: str, amount: int, transaction_type: str = "transfer") -> bool:
+    """Transfer money directly"""
     from_ref = get_user_ref(from_id)
     to_ref = get_user_ref(to_id)
     
-    @firestore.transactional
-    async def transfer_in_transaction(transaction: firestore_transaction.Transaction):
-        from_doc = transaction.get(from_ref)
-        to_doc = transaction.get(to_ref)
-        if not from_doc.exists or not to_doc.exists:
-            raise ValueError("User not found")
-        from_data = from_doc.to_dict()
-        to_data = to_doc.to_dict()
-        if from_data.get("balance", 0) < amount:
-            raise ValueError("Insufficient balance")
-        from_data["balance"] = from_data["balance"] - amount
-        to_data["balance"] = to_data.get("balance", 0) + amount
-        transaction.update(from_ref, {"balance": from_data["balance"]})
-        transaction.update(to_ref, {"balance": to_data["balance"]})
+    from_doc = from_ref.get()
+    to_doc = to_ref.get()
     
-    try:
-        transfer_in_transaction(db.transaction())
-        await add_log(transaction_type, from_id, amount, to_id)
-        await add_transaction(transaction_type, from_id, amount, to_id)
-        return True
-    except Exception as e:
-        print(f"Transfer error: {e}")
+    if not from_doc.exists:
+        print(f"❌ Sender {from_id} not found")
         return False
+    if not to_doc.exists:
+        print(f"❌ Receiver {to_id} not found")
+        return False
+    
+    from_data = from_doc.to_dict()
+    to_data = to_doc.to_dict()
+    
+    if from_data.get("balance", 0) < amount:
+        print(f"❌ Insufficient balance: {from_data.get('balance', 0)} < {amount}")
+        return False
+    
+    from_data["balance"] = from_data["balance"] - amount
+    to_data["balance"] = to_data.get("balance", 0) + amount
+    
+    from_ref.set(from_data)
+    to_ref.set(to_data)
+    
+    await add_log(transaction_type, from_id, amount, to_id)
+    await add_transaction(transaction_type, from_id, amount, to_id)
+    
+    print(f"💸 Transfer: {from_id} -> {to_id}: {amount:,} VNĐ")
+    return True
 
-async def add_money_transaction(user_id: str, amount: int, admin_id: str = "system") -> bool:
+async def add_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
+    """Add money directly"""
     user_ref = get_user_ref(user_id)
+    user_doc = user_ref.get()
     
-    @firestore.transactional
-    async def add_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = transaction.get(user_ref)
-        if not user_doc.exists:
-            raise ValueError("User not found")
-        user_data = user_doc.to_dict()
-        user_data["balance"] = user_data.get("balance", 0) + amount
-        transaction.update(user_ref, {"balance": user_data["balance"]})
-    
-    try:
-        add_in_transaction(db.transaction())
-        await add_log("addmoney", user_id, amount, admin_id)
-        await add_transaction("addmoney", user_id, amount, admin_id)
-        return True
-    except Exception as e:
-        print(f"Add money error: {e}")
+    if not user_doc.exists:
+        print(f"❌ User {user_id} not found")
         return False
+    
+    user_data = user_doc.to_dict()
+    user_data["balance"] = user_data.get("balance", 0) + amount
+    user_ref.set(user_data)
+    
+    await add_log("addmoney", user_id, amount, admin_id)
+    await add_transaction("addmoney", user_id, amount, admin_id)
+    
+    print(f"💰 Added {amount:,} to {user_id}, balance: {user_data['balance']:,}")
+    return True
 
-async def remove_money_transaction(user_id: str, amount: int, admin_id: str = "system") -> bool:
+async def remove_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
+    """Remove money directly"""
     user_ref = get_user_ref(user_id)
+    user_doc = user_ref.get()
     
-    @firestore.transactional
-    async def remove_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = transaction.get(user_ref)
-        if not user_doc.exists:
-            raise ValueError("User not found")
-        user_data = user_doc.to_dict()
-        if user_data.get("balance", 0) < amount:
-            raise ValueError("Insufficient balance")
-        user_data["balance"] = user_data["balance"] - amount
-        transaction.update(user_ref, {"balance": user_data["balance"]})
-    
-    try:
-        remove_in_transaction(db.transaction())
-        await add_log("trutien", user_id, amount, admin_id)
-        await add_transaction("trutien", user_id, amount, admin_id)
-        return True
-    except Exception as e:
-        print(f"Remove money error: {e}")
+    if not user_doc.exists:
+        print(f"❌ User {user_id} not found")
         return False
+    
+    user_data = user_doc.to_dict()
+    if user_data.get("balance", 0) < amount:
+        print(f"❌ Insufficient balance: {user_data.get('balance', 0)} < {amount}")
+        return False
+    
+    user_data["balance"] = user_data["balance"] - amount
+    user_ref.set(user_data)
+    
+    await add_log("trutien", user_id, amount, admin_id)
+    await add_transaction("trutien", user_id, amount, admin_id)
+    
+    print(f"💸 Removed {amount:,} from {user_id}, balance: {user_data['balance']:,}")
+    return True
 
-async def deduct_bet_amount(user_id: str, amount: int) -> bool:
+async def deduct_bet(user_id: str, amount: int) -> bool:
+    """Deduct bet amount directly"""
     user_ref = get_user_ref(user_id)
+    user_doc = user_ref.get()
     
-    @firestore.transactional
-    async def deduct_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = transaction.get(user_ref)
-        if not user_doc.exists:
-            raise ValueError("User not found")
-        user_data = user_doc.to_dict()
-        if user_data.get("balance", 0) < amount:
-            raise ValueError("Insufficient balance")
-        user_data["balance"] = user_data["balance"] - amount
-        transaction.update(user_ref, {"balance": user_data["balance"]})
-    
-    try:
-        deduct_in_transaction(db.transaction())
-        return True
-    except Exception as e:
-        print(f"Deduct bet error: {e}")
+    if not user_doc.exists:
+        print(f"❌ User {user_id} not found")
         return False
+    
+    user_data = user_doc.to_dict()
+    if user_data.get("balance", 0) < amount:
+        print(f"❌ Insufficient balance: {user_data.get('balance', 0)} < {amount}")
+        return False
+    
+    user_data["balance"] = user_data["balance"] - amount
+    user_ref.set(user_data)
+    print(f"🎲 Deducted bet {amount:,} from {user_id}, balance: {user_data['balance']:,}")
+    return True
 
-async def add_win_amount(user_id: str, amount: int) -> bool:
+async def add_win(user_id: str, amount: int) -> bool:
+    """Add win amount directly"""
     user_ref = get_user_ref(user_id)
+    user_doc = user_ref.get()
     
-    @firestore.transactional
-    async def add_in_transaction(transaction: firestore_transaction.Transaction):
-        user_doc = transaction.get(user_ref)
-        if not user_doc.exists:
-            raise ValueError("User not found")
-        user_data = user_doc.to_dict()
-        user_data["balance"] = user_data.get("balance", 0) + amount
-        transaction.update(user_ref, {"balance": user_data["balance"]})
-    
-    try:
-        add_in_transaction(db.transaction())
-        return True
-    except Exception as e:
-        print(f"Add win error: {e}")
+    if not user_doc.exists:
+        print(f"❌ User {user_id} not found")
         return False
-
-async def refund_bet_amount(user_id: str, amount: int) -> bool:
-    return await add_win_amount(user_id, amount)
+    
+    user_data = user_doc.to_dict()
+    user_data["balance"] = user_data.get("balance", 0) + amount
+    user_ref.set(user_data)
+    print(f"🎉 Added win {amount:,} to {user_id}, balance: {user_data['balance']:,}")
+    return True
 
 async def check_and_deduct_shield(user_id: str) -> bool:
+    """Check and deduct free bet shield"""
     user_ref = get_user_ref(user_id)
-    user_data = await get_user_data(user_id)
+    user_doc = user_ref.get()
     
-    if user_data and user_data.get("freeBetShield", 0) > 0:
-        @firestore.transactional
-        async def deduct_shield_in_transaction(transaction: firestore_transaction.Transaction):
-            user_doc = transaction.get(user_ref)
-            if user_doc.exists:
-                user_data_tx = user_doc.to_dict()
-                if user_data_tx.get("freeBetShield", 0) > 0:
-                    transaction.update(user_ref, {"freeBetShield": user_data_tx["freeBetShield"] - 1})
-        
-        try:
-            deduct_shield_in_transaction(db.transaction())
-            return True
-        except Exception as e:
-            print(f"Deduct shield error: {e}")
+    if not user_doc.exists:
+        return False
+    
+    user_data = user_doc.to_dict()
+    if user_data.get("freeBetShield", 0) > 0:
+        user_data["freeBetShield"] -= 1
+        user_ref.set(user_data)
+        print(f"🛡️ Shield used for {user_id}, remaining: {user_data['freeBetShield']}")
+        return True
     return False
 
 async def check_and_deduct_coupon(user_id: str) -> bool:
+    """Check and deduct discount coupon"""
     user_ref = get_user_ref(user_id)
-    user_data = await get_user_data(user_id)
+    user_doc = user_ref.get()
     
-    if user_data and user_data.get("discountCouponUses", 0) > 0:
-        @firestore.transactional
-        async def deduct_coupon_in_transaction(transaction: firestore_transaction.Transaction):
-            user_doc = transaction.get(user_ref)
-            if user_doc.exists:
-                user_data_tx = user_doc.to_dict()
-                if user_data_tx.get("discountCouponUses", 0) > 0:
-                    transaction.update(user_ref, {"discountCouponUses": user_data_tx["discountCouponUses"] - 1})
-        
-        try:
-            deduct_coupon_in_transaction(db.transaction())
-            return True
-        except Exception as e:
-            print(f"Deduct coupon error: {e}")
+    if not user_doc.exists:
+        return False
+    
+    user_data = user_doc.to_dict()
+    if user_data.get("discountCouponUses", 0) > 0:
+        user_data["discountCouponUses"] -= 1
+        user_ref.set(user_data)
+        print(f"📄 Coupon used for {user_id}, remaining: {user_data['discountCouponUses']}")
+        return True
     return False
 
 # ============================================
@@ -506,6 +489,8 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"🔄 Synced {len(synced)} command(s)")
+        for cmd in synced:
+            print(f"   📌 /{cmd.name} - {cmd.description}")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{len(bot.guilds)} servers | /help"))
@@ -581,7 +566,7 @@ async def daily(interaction: discord.Interaction):
                 await interaction.response.send_message(f"⏰ Bạn đã nhận daily rồi! Vui lòng đợi {hours} giờ {minutes} phút.", ephemeral=True)
                 return
     
-    success = await add_money_transaction(user_id, DAILY_REWARD)
+    success = await add_money(user_id, DAILY_REWARD)
     if success:
         get_user_ref(user_id).update({"dailyLastClaim": datetime.now(timezone.utc)})
         embed = create_embed(title="🎁 Điểm Danh Hàng Ngày", description=f"Bạn đã nhận được **{DAILY_REWARD:,} VNĐ**!", color=COLOR_GOLD, thumbnail_url=interaction.user.display_avatar.url, footer_text="Hẹn gặp lại vào ngày mai!")
@@ -870,41 +855,32 @@ async def shop(interaction: discord.Interaction):
                 return
             
             user_id_btn = str(button_interaction.user.id)
-            user_data_btn = await get_user_data(user_id_btn)
+            user_ref = get_user_ref(user_id_btn)
+            user_doc = user_ref.get()
+            
+            if not user_doc.exists:
+                await button_interaction.response.send_message("❌ Người dùng không tồn tại!", ephemeral=True)
+                return
+            
+            user_data_btn = user_doc.to_dict()
             
             if user_data_btn["balance"] < self.price:
                 await button_interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.price:,} VNĐ", ephemeral=True)
                 return
             
-            @firestore.transactional
-            async def buy_in_transaction(transaction: firestore_transaction.Transaction):
-                user_ref = get_user_ref(user_id_btn)
-                user_doc = transaction.get(user_ref)
-                if not user_doc.exists:
-                    raise ValueError("User not found")
-                user_data_tx = user_doc.to_dict()
-                if user_data_tx["balance"] < self.price:
-                    raise ValueError("Insufficient balance")
-                
-                user_data_tx["balance"] -= self.price
-                
-                if "Phiếu Giảm Giá" in self.item_name:
-                    user_data_tx["discountCouponUses"] = user_data_tx.get("discountCouponUses", 0) + 3
-                    msg = f"✅ Mua thành công **{self.item_name}**! Bạn có thêm 3 lượt sử dụng."
-                else:
-                    user_data_tx["freeBetShield"] = user_data_tx.get("freeBetShield", 0) + 1
-                    msg = f"✅ Mua thành công **{self.item_name}**! Khi thua sẽ không mất tiền."
-                
-                transaction.update(user_ref, user_data_tx)
-                return msg
+            user_data_btn["balance"] -= self.price
             
-            try:
-                msg = buy_in_transaction(db.transaction())
-                await add_log("shop", user_id_btn, self.price, description=self.item_name)
-                await add_transaction("shop", user_id_btn, -self.price, description=self.item_name)
-                await button_interaction.response.send_message(msg, ephemeral=True)
-            except Exception as e:
-                await button_interaction.response.send_message(f"❌ Lỗi: {str(e)}", ephemeral=True)
+            if "Phiếu Giảm Giá" in self.item_name:
+                user_data_btn["discountCouponUses"] = user_data_btn.get("discountCouponUses", 0) + 3
+                msg = f"✅ Mua thành công **{self.item_name}**! Bạn có thêm 3 lượt sử dụng."
+            else:
+                user_data_btn["freeBetShield"] = user_data_btn.get("freeBetShield", 0) + 1
+                msg = f"✅ Mua thành công **{self.item_name}**! Khi thua sẽ không mất tiền."
+            
+            user_ref.set(user_data_btn)
+            await add_log("shop", user_id_btn, self.price, description=self.item_name)
+            await add_transaction("shop", user_id_btn, -self.price, description=self.item_name)
+            await button_interaction.response.send_message(msg, ephemeral=True)
     
     class ShopView(discord.ui.View):
         def __init__(self):
@@ -1176,7 +1152,7 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
     await interaction.response.send_message(embed=embed, view=XinView())
 
 # ============================================
-# TAI XIU GAME
+# GAME: TAI XIU
 # ============================================
 @bot.tree.command(name="taixiu", description="🎲 Chơi Tài Xỉu")
 @app_commands.describe(cua="Cửa cược (tai/xiu/chan/le hoặc số 3-18)", cuoc="Số tiền cược (nhập 'all' để cược tất cả)")
@@ -1228,7 +1204,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
             await interaction.response.send_message("❌ Cửa cược không hợp lệ! (tai/xiu/chan/le hoặc 3-18)", ephemeral=True)
             return
     
-    success = await deduct_bet_amount(user_id, bet_amount)
+    success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
@@ -1238,7 +1214,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     
     dice_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
     
-    embed = create_embed(title="🎲 Tài Xỉu", description="Đang lắc xúc xắc...", color=COLOR_GOLD, fields=[("Xúc xắc", "? ? ?", False)])
+    embed = create_embed(title="🎲 Tài Xỉu", description="Đang lắc xúc xắc...", color=COLOR_GOLD)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     
@@ -1296,17 +1272,17 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     if not win:
         has_shield = await check_and_deduct_shield(user_id)
         if has_shield:
-            await refund_bet_amount(user_id, bet_amount)
+            await add_win(user_id, bet_amount)
             result_text = "🛡️ **Phiếu Miễn Cược** đã bảo vệ bạn! Tiền cược được hoàn trả."
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
         else:
             result_text = "😢 Bạn đã thua!"
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
     else:
         win_amount = bet_amount * multiplier
-        await add_win_amount(user_id, win_amount)
+        await add_win(user_id, win_amount)
         result_text = f"🎉 Bạn đã thắng **{win_amount:,} VNĐ**! (x{multiplier})"
-        await update_user_stats_transaction(user_id, True, bet_amount, win_amount)
+        await update_user_stats(user_id, True, bet_amount, win_amount)
     
     get_game_history_ref().add({
         "result": total,
@@ -1330,7 +1306,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     await msg.edit(embed=embed)
 
 # ============================================
-# COINFLIP GAME
+# GAME: COINFLIP
 # ============================================
 @bot.tree.command(name="coinflip", description="🪙 Tung đồng xu")
 @app_commands.describe(choice="Chọn mặt (head/tail)", amount="Số tiền cược (nhập 'all' để cược tất cả)")
@@ -1367,7 +1343,7 @@ async def coinflip(interaction: discord.Interaction, choice: str, amount: str):
         await interaction.response.send_message("❌ Chọn head hoặc tail!", ephemeral=True)
         return
     
-    success = await deduct_bet_amount(user_id, bet_amount)
+    success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
@@ -1383,31 +1359,30 @@ async def coinflip(interaction: discord.Interaction, choice: str, amount: str):
     
     result = random.choice(["head", "tail"])
     result_emoji = "🪙 Mặt Ngửa (Head)" if result == "head" else "🪙 Mặt Sấp (Tail)"
-    
     win = choice_lower == result
     
     if win:
         win_amount = bet_amount * 2
-        await add_win_amount(user_id, win_amount)
+        await add_win(user_id, win_amount)
         result_text = f"🎉 Bạn thắng **{win_amount:,} VNĐ**! (x2)"
-        await update_user_stats_transaction(user_id, True, bet_amount, win_amount)
+        await update_user_stats(user_id, True, bet_amount, win_amount)
         color = COLOR_SUCCESS
     else:
         has_shield = await check_and_deduct_shield(user_id)
         if has_shield:
-            await refund_bet_amount(user_id, bet_amount)
+            await add_win(user_id, bet_amount)
             result_text = "🛡️ Phiếu Miễn Cược bảo vệ bạn! Tiền được hoàn trả."
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
         else:
             result_text = "😢 Bạn đã thua!"
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
         color = COLOR_ERROR
     
     embed = create_embed(title="🪙 Kết Quả CoinFlip", description=f"**Kết quả:** {result_emoji}\n\n{result_text}", color=color)
     await msg.edit(embed=embed)
 
 # ============================================
-# SLOT MACHINE
+# GAME: SLOT MACHINE
 # ============================================
 @bot.tree.command(name="slot", description="🎰 Quay máy đánh bạc")
 @app_commands.describe(amount="Số tiền cược (nhập 'all' để cược tất cả)")
@@ -1434,7 +1409,7 @@ async def slot(interaction: discord.Interaction, amount: str):
         await interaction.response.send_message("❌ Số dư không đủ!", ephemeral=True)
         return
     
-    success = await deduct_bet_amount(user_id, bet_amount)
+    success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
@@ -1473,19 +1448,19 @@ async def slot(interaction: discord.Interaction, amount: str):
     
     if win:
         win_amount = int(bet_amount * multiplier)
-        await add_win_amount(user_id, win_amount)
+        await add_win(user_id, win_amount)
         result_text = f"🎉 Bạn thắng **{win_amount:,} VNĐ**! (x{multiplier})"
-        await update_user_stats_transaction(user_id, True, bet_amount, win_amount)
+        await update_user_stats(user_id, True, bet_amount, win_amount)
         color = COLOR_SUCCESS
     else:
         has_shield = await check_and_deduct_shield(user_id)
         if has_shield:
-            await refund_bet_amount(user_id, bet_amount)
+            await add_win(user_id, bet_amount)
             result_text = "🛡️ Phiếu Miễn Cược bảo vệ bạn! Tiền được hoàn trả."
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
         else:
             result_text = "😢 Bạn đã thua!"
-            await update_user_stats_transaction(user_id, False, bet_amount, 0)
+            await update_user_stats(user_id, False, bet_amount, 0)
         color = COLOR_ERROR
     
     final_display = ""
@@ -1496,7 +1471,7 @@ async def slot(interaction: discord.Interaction, amount: str):
     await msg.edit(embed=embed)
 
 # ============================================
-# CHOI LO DIT
+# GAME: CHOI LO DIT
 # ============================================
 @bot.tree.command(name="choilodit", description="🎯 Chơi lỗ đít người khác")
 @app_commands.describe(user="Người bị chơi lỗ đít")
@@ -1556,7 +1531,6 @@ async def addadmin(interaction: discord.Interaction, user: discord.User):
         return
     
     get_admin_ref(target_id).set({"userId": target_id, "role": "mini"})
-    
     embed = create_embed(title="👑 Thêm Admin", description=f"Đã thêm **{user.name}** làm **Mini Admin**!", color=COLOR_GOLD, thumbnail_url=user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -1575,7 +1549,6 @@ async def removeadmin(interaction: discord.Interaction, user: discord.User):
         return
     
     get_admin_ref(target_id).delete()
-    
     embed = create_embed(title="👑 Xóa Admin", description=f"Đã xóa **{user.name}** khỏi admin!", color=COLOR_RED, thumbnail_url=user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
@@ -1592,8 +1565,7 @@ async def addmoney(interaction: discord.Interaction, user: discord.User, amount:
     
     target_id = str(user.id)
     await create_user_if_not_exists(target_id)
-    
-    success = await add_money_transaction(target_id, amount, str(interaction.user.id))
+    success = await add_money(target_id, amount, str(interaction.user.id))
     
     if success:
         embed = create_embed(title="💰 Thêm Tiền", description=f"Đã thêm **{amount:,} VNĐ** cho **{user.name}**!", color=COLOR_SUCCESS, thumbnail_url=user.display_avatar.url)
@@ -1614,8 +1586,7 @@ async def trutien(interaction: discord.Interaction, user: discord.User, amount: 
     
     target_id = str(user.id)
     await create_user_if_not_exists(target_id)
-    
-    success = await remove_money_transaction(target_id, amount, str(interaction.user.id))
+    success = await remove_money(target_id, amount, str(interaction.user.id))
     
     if success:
         embed = create_embed(title="💸 Trừ Tiền", description=f"Đã trừ **{amount:,} VNĐ** từ **{user.name}**!", color=COLOR_WARNING, thumbnail_url=user.display_avatar.url)
@@ -1648,9 +1619,8 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
                 return
             
             await create_user_if_not_exists(user_id_btn)
-            await add_money_transaction(user_id_btn, amount, str(interaction.user.id))
+            await add_money(user_id_btn, amount, str(interaction.user.id))
             self.claimed.add(user_id_btn)
-            
             await button_interaction.response.send_message(f"🧧 Bạn đã nhận **{amount:,} VNĐ**! Chúc mừng năm mới! 🎉", ephemeral=True)
     
     embed = create_embed(
@@ -1671,7 +1641,7 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
     await msg.edit(content=None, embed=embed, view=LixiView())
 
 # ============================================
-# LICH SU COMMAND
+# LICH SU + AI + PHAN TICH
 # ============================================
 @bot.tree.command(name="lichsu", description="📋 Xem lịch sử giao dịch")
 @check_cooldown("lichsu", COOLDOWN_NORMAL)
@@ -1715,9 +1685,6 @@ async def lichsu(interaction: discord.Interaction):
     embed = create_embed(title="📋 Lịch Sử Giao Dịch", description=description, color=COLOR_INFO, thumbnail_url=interaction.user.display_avatar.url, footer_text=f"Người chơi: {interaction.user.name}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ============================================
-# AI PREDICTION
-# ============================================
 @bot.tree.command(name="doan", description="🤖 AI dự đoán Tài Xỉu")
 @check_cooldown("doan", COOLDOWN_NORMAL)
 async def doan(interaction: discord.Interaction):
@@ -1733,7 +1700,6 @@ async def doan(interaction: discord.Interaction):
     
     tai_count = sum(1 for g in game_list if g.get("taiOrXiu") == "tai")
     xiu_count = sum(1 for g in game_list if g.get("taiOrXiu") == "xiu")
-    
     total = tai_count + xiu_count
     tai_percent = (tai_count / total * 100) if total > 0 else 50
     confidence = 50 + random.randint(0, 15)
@@ -1756,13 +1722,10 @@ async def doan(interaction: discord.Interaction):
             (f"{EMOJI_TAI} Tài gần đây", f"{tai_count}/{total} ({tai_percent:.0f}%)", True),
             (f"{EMOJI_XIU} Xỉu gần đây", f"{xiu_count}/{total} ({100-tai_percent:.0f}%)", True),
         ],
-        footer_text="⚠️ Dự đoán chỉ mang tính tham khảo, không đảm bảo chính xác!"
+        footer_text="⚠️ Dự đoán chỉ mang tính tham khảo!"
     )
     await interaction.response.send_message(embed=embed)
 
-# ============================================
-# PHAN TICH COMMAND
-# ============================================
 @bot.tree.command(name="phantich", description="📊 Phân tích xu hướng Tài Xỉu")
 @check_cooldown("phantich", COOLDOWN_NORMAL)
 async def phantich(interaction: discord.Interaction):
@@ -1772,10 +1735,8 @@ async def phantich(interaction: discord.Interaction):
     await interaction.response.send_message("⏳ Đang thu thập dữ liệu...")
     msg = await interaction.original_response()
     await asyncio.sleep(0.8)
-    
     await msg.edit(content="📊 Đang phân tích...")
     await asyncio.sleep(0.8)
-    
     await msg.edit(content="🎯 Đang dự đoán...")
     await asyncio.sleep(0.8)
     
@@ -1804,8 +1765,8 @@ async def phantich(interaction: discord.Interaction):
             break
     
     streak_text = f"{current_streak} ván {streak_type} liên tiếp" if streak_type else "Không có"
-    
     confidence = 50 + min(len(game_list), 29)
+    
     if tai_count > xiu_count:
         prediction = f"{EMOJI_TAI} TÀI"
     elif xiu_count > tai_count:
@@ -1840,52 +1801,34 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             pass
 
 # ============================================
-# HTTP SERVER FOR RENDER HEALTH CHECK
+# HTTP SERVER
 # ============================================
 async def health_check(request):
-    return web.Response(
-        text=json.dumps({
-            "status": "online",
-            "bot": str(bot.user) if bot.user else "Starting...",
-            "guilds": len(bot.guilds),
-            "latency": f"{bot.latency * 1000:.2f}ms" if bot.ws else "N/A",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }),
-        content_type="application/json"
-    )
+    return web.Response(text=json.dumps({"status": "online", "bot": str(bot.user) if bot.user else "Starting...", "guilds": len(bot.guilds), "latency": f"{bot.latency * 1000:.2f}ms" if bot.ws else "N/A", "timestamp": datetime.now(timezone.utc).isoformat()}), content_type="application/json")
 
 async def dashboard(request):
-    return web.Response(
-        text=f"""<!DOCTYPE html><html><head><title>Discord Casino Bot</title><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{{font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;}}.container{{text-align:center;background:rgba(255,255,255,0.1);padding:40px;border-radius:20px;backdrop-filter:blur(10px);}}.status{{color:#4ade80;font-size:24px;margin:20px 0;}}.info{{color:#e2e8f0;font-size:18px;margin:10px 0;}}.emoji{{font-size:48px;}}</style></head><body><div class="container"><div class="emoji">🎰</div><h1>Discord Casino Bot</h1><div class="status">🟢 Bot is Online</div><div class="info">🤖 Bot: {str(bot.user) if bot.user else "Loading..."}</div><div class="info">📡 Servers: {len(bot.guilds)}</div><div class="info">⏱️ Latency: {f"{bot.latency * 1000:.2f}ms" if bot.ws else "N/A"}</div><div class="info">🕒 Uptime: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div><p style="margin-top:30px;opacity:0.7;">Made with ❤️ for Discord</p></div></body></html>""",
-        content_type="text/html"
-    )
+    return web.Response(text=f"<!DOCTYPE html><html><head><title>Discord Casino Bot</title><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'><style>body{{font-family:Arial;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:linear-gradient(135deg,#667eea,#764ba2);color:white}}.container{{text-align:center;background:rgba(255,255,255,.1);padding:40px;border-radius:20px}}</style></head><body><div class='container'><h1>🎰 Discord Casino Bot</h1><p style='color:#4ade80;font-size:24px'>🟢 Online</p><p>🤖 {str(bot.user) if bot.user else 'Loading...'}</p><p>📡 {len(bot.guilds)} servers</p></div></body></html>", content_type="text/html")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', dashboard)
-    
     port = int(os.getenv("PORT", 8080))
-    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    
     print(f"🌐 Web server started on port {port}")
 
 # ============================================
-# RUN BOT + WEB SERVER
+# RUN
 # ============================================
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("❌ DISCORD_TOKEN not found in environment variables!")
+        print("❌ DISCORD_TOKEN not found!")
         exit(1)
     
     print("🚀 Starting Discord Casino Bot...")
-    print(f"📝 Python 3.12 + discord.py 2.x")
-    print(f"🔥 Firebase Firestore connected")
-    print(f"🌐 Web server mode: Render Web Service")
     
     @bot.event
     async def setup_hook():
@@ -1893,7 +1836,5 @@ if __name__ == "__main__":
     
     try:
         bot.run(DISCORD_TOKEN)
-    except discord.LoginFailure:
-        print("❌ Invalid Discord token!")
     except Exception as e:
         print(f"❌ Bot crashed: {e}")
