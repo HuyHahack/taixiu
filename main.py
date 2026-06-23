@@ -2061,19 +2061,23 @@ async def dashboard(request):
         content_type="text/html"
     )
 
-def run_web_server():
-    """Run aiohttp web server"""
+async def start_web_server():
+    """Start aiohttp web server in the same event loop"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', dashboard)
     
     port = int(os.getenv("PORT", 8080))
     
-    print(f"🌐 Web server starting on port {port}")
-    web.run_app(app, host="0.0.0.0", port=port, print=None)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    print(f"🌐 Web server started on port {port}")
 
 # ============================================
-# RUN BOT + WEB SERVER
+# RUN BOT + WEB SERVER (SAME EVENT LOOP)
 # ============================================
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
@@ -2085,9 +2089,10 @@ if __name__ == "__main__":
     print(f"🔥 Firebase Firestore connected")
     print(f"🌐 Web server mode: Render Web Service")
     
-    # Start web server in separate thread
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
+    # Start web server using bot's event loop
+    @bot.event
+    async def setup_hook():
+        await start_web_server()
     
     # Run Discord bot (blocking)
     try:
