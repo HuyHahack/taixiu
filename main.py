@@ -910,6 +910,353 @@ def detect_cau_pattern(game_list: List[Dict]) -> str:
     return "Cầu gãy / Không xác định"
 
 # ============================================
+# BLACKJACK CARD SYSTEM
+# ============================================
+SUITS = ["♠", "♥", "♦", "♣"]
+RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+RANK_VALUES = {"A": 11, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "J": 10, "Q": 10, "K": 10}
+
+class BlackjackDeck:
+    def __init__(self):
+        self.cards = []
+        self.reset()
+    
+    def reset(self):
+        self.cards = [(rank, suit) for suit in SUITS for rank in RANKS]
+        random.shuffle(self.cards)
+    
+    def draw(self):
+        if not self.cards:
+            self.reset()
+        return self.cards.pop()
+
+def calculate_hand(hand):
+    value = 0
+    aces = 0
+    for card in hand:
+        if card[0] == "A":
+            aces += 1
+        value += RANK_VALUES[card[0]]
+    while value > 21 and aces > 0:
+        value -= 10
+        aces -= 1
+    return value
+
+def hand_str(hand, hide_second=False):
+    if hide_second and len(hand) >= 2:
+        return f"{hand[0][1]}{hand[0][0]} ??"
+    return " ".join([f"{c[1]}{c[0]}" for c in hand])
+
+async def start_blackjack_full(room_id: str, thread: discord.Thread):
+    room = room_manager.get_room(room_id)
+    if not room:
+        return
+    
+    players = room["players"]
+    bet_amount = room["betAmount"]
+    deck = BlackjackDeck()
+    
+    player_hands = {p: [deck.draw(), deck.draw()] for p in players}
+    dealer_hand = [deck.draw(), deck.draw()]
+    player_bust = {p: False for p in players}
+    player_blackjack = {p: False for p in players}
+    player_done = {p: False for p in players}
+    
+    # Check blackjacks
+    for p in players:
+        if calculate_hand(player_hands[p]) == 21:
+            player_blackjack[p] = True
+            player_done[p] = True
+    
+    state = {
+        "deck": deck, "player_hands": player_hands, "dealer_hand": dealer_hand,
+        "player_bust": player_bust, "player_blackjack": player_blackjack,
+        "player_done": player_done, "bet_amount": bet_amount
+    }
+    room_manager.room_states[room_id] = state
+    
+    embed = create_embed(
+        title="🃏 BLACKJACK - BẮT ĐẦU",
+        description=f"**Dealer:** {hand_str(dealer_hand, hide_second=True)}\n\nTừng người chơi sẽ đến lượt!",
+        color=COLOR_GOLD
+    )
+    await thread.send(embed=embed)
+    await asyncio.sleep(1)
+    
+    for player_id in players:
+        if player_blackjack[player_id]:
+            await thread.send(f"🎉 <@{player_id}> **BLACKJACK!** {hand_str(player_hands[player_id])} = 21!")
+            continue
+        
+        await bj_player_turn(room_id, thread, player_id, state)
+    
+    # Dealer turn
+    await thread.send("🤖 **Đến lượt Dealer...**")
+    await asyncio.sleep(1)
+    
+    dealer_value = calculate_hand(dealer_hand)
+    embed = create_embed(title="🃏 Dealer Mở Bài", description=f"**Dealer:** {hand_str(dealer_hand)}\n**Điểm:** {dealer_value}", color=COLOR_GOLD)
+    await thread.send(embed=embed)
+    await asyncio.sleep(1)
+    
+    while dealer_value < 17:
+        dealer_hand.append(deck.draw())
+        dealer_value = calculate_hand(dealer_hand)
+        await thread.send(f"🤖 Dealer rút: {hand_str(dealer_hand)} = **{dealer_value}**")
+        await asyncio.sleep(1)
+    
+    if dealer_value > 21:
+        await thread.send("💥 **Dealer BUST!**")
+    
+    # Results
+    await asyncio.sleep(1)
+    description = "🃏 **KẾT QUẢ BLACKJACK**\n\n"
+    rankings = {}
+    
+    for player_id in players:
+        pv = calculate_hand(player_hands[player_id])
+        if player_bust[player_id]:
+            result = "💀 BUST"
+            reward = 0
+        elif player_blackjack[player_id]:
+            if dealer_value == 21:
+                result = "🤝 HÒA"
+                reward = bet_amount
+            else:
+                result = "🎉 BLACKJACK x2.5"
+                reward = int(bet_amount * 2.5)
+        elif dealer_value > 21:
+            result = "🎉 Thắng"
+            reward = int(bet_amount * 2)
+        elif pv > dealer_value:
+            result = "🎉 Thắng"
+            reward = int(bet_amount * 2)
+        elif pv == dealer_value:
+            result = "🤝 HÒA"
+            reward = bet_amount
+        else:
+            result = "😢 Thua"
+            reward = 0
+        
+        if reward > 0:
+            await add_win(player_id, reward)
+        
+        description += f"<@{player_id}>: {hand_str(player_hands[player_id])} = **{pv}** → {result} | 💰 {reward:,} VNĐ\n\n"
+        rankings[player_id] = {"hand": hand_str(player_hands[player_id]), "value": pv, "reward": reward}
+    
+    description += f"**Dealer:** {hand_str(dealer_hand)} = **{dealer_value}**\n\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
+    
+    embed = create_embed(title="🏆 Kết Quả Blackjack", description=description, color=COLOR_GOLD)
+    await thread.send(embed=embed)
+    await asyncio.sleep(15)
+    await end_game_and_cleanup(room_id, thread, {"rankings": rankings})
+
+async def bj_player_turn(room_id: str, thread: discord.Thread, player_id: str, state: dict):
+    hand = state["player_hands"][player_id]
+    value = calculate_hand(hand)
+    
+    view = BJView(room_id, player_id, state)
+    room_manager.store_view(f"{room_id}_{player_id}", view)
+    
+    embed = create_embed(
+        title="🃏 Lượt của bạn",
+        description=f"**Bài:** {hand_str(hand)}\n**Điểm:** {value}\n\n**Dealer:** {hand_str(state['dealer_hand'], hide_second=True)}",
+        color=COLOR_GOLD
+    )
+    
+    msg = await thread.send(f"<@{player_id}>", embed=embed, view=view)
+    
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if state["player_done"].get(player_id, False):
+            break
+    
+    if not state["player_done"].get(player_id, False):
+        state["player_done"][player_id] = True
+    
+    try:
+        view.stop()
+        for item in view.children:
+            item.disabled = True
+        await msg.edit(view=view)
+    except:
+        pass
+
+class BJView(discord.ui.View):
+    def __init__(self, room_id: str, player_id: str, state: dict):
+        super().__init__(timeout=30)
+        self.room_id = room_id
+        self.player_id = player_id
+        self.state = state
+    
+    @discord.ui.button(label="HIT (Rút)", style=discord.ButtonStyle.primary, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.player_id:
+            await interaction.response.send_message("❌ Không phải lượt của bạn!", ephemeral=True)
+            return
+        
+        deck = self.state["deck"]
+        hand = self.state["player_hands"][self.player_id]
+        hand.append(deck.draw())
+        value = calculate_hand(hand)
+        
+        if value > 21:
+            self.state["player_bust"][self.player_id] = True
+            self.state["player_done"][self.player_id] = True
+            await interaction.response.edit_message(content=f"💥 **BUST!** {hand_str(hand)} = {value}", embed=None, view=None)
+        elif value == 21:
+            self.state["player_done"][self.player_id] = True
+            await interaction.response.edit_message(content=f"🎯 **21!** {hand_str(hand)}", embed=None, view=None)
+        else:
+            embed = create_embed(title="🃏 Lượt của bạn", description=f"**Bài:** {hand_str(hand)}\n**Điểm:** {value}\n\n**Dealer:** {hand_str(self.state['dealer_hand'], hide_second=True)}", color=COLOR_GOLD)
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="STAND (Dừng)", style=discord.ButtonStyle.success, emoji="✋")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.player_id:
+            await interaction.response.send_message("❌ Không phải lượt của bạn!", ephemeral=True)
+            return
+        
+        self.state["player_done"][self.player_id] = True
+        hand = self.state["player_hands"][self.player_id]
+        value = calculate_hand(hand)
+        await interaction.response.edit_message(content=f"✋ **STAND** với {hand_str(hand)} = {value}", embed=None, view=None)
+
+# ============================================
+# TIEN LEN CARD SYSTEM (Cơ > Rô > Chuồng > Bích)
+# ============================================
+TL_SUITS = ["♠", "♥", "♦", "♣"]
+TL_RANKS = ["3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A", "2"]
+TL_RANK_ORDER = {r: i for i, r in enumerate(TL_RANKS)}
+TL_SUIT_ORDER = {"♥": 3, "♦": 2, "♣": 1, "♠": 0}
+
+def tl_card_sort_key(card):
+    return (TL_RANK_ORDER[card[0]], TL_SUIT_ORDER[card[1]])
+
+class TienLenDeck:
+    def __init__(self):
+        self.cards = []
+        self.reset()
+    
+    def reset(self):
+        self.cards = [(rank, suit) for suit in TL_SUITS for rank in TL_RANKS]
+        random.shuffle(self.cards)
+    
+    def deal(self, num_players: int):
+        cards_per = 52 // num_players
+        hands = []
+        for _ in range(num_players):
+            hand = sorted(self.cards[:cards_per], key=tl_card_sort_key)
+            self.cards = self.cards[cards_per:]
+            hands.append(hand)
+        return hands
+
+def tl_card_display(card):
+    return f"{card[1]}{card[0]}"
+
+def tl_hand_display(hand):
+    return " ".join([tl_card_display(c) for c in hand])
+
+def tl_get_card_emoji(card):
+    suit_emojis = {"♥": "❤️", "♦": "🔶", "♣": "🍀", "♠": "♠️"}
+    return f"{suit_emojis[card[1]]}{card[0]}"
+
+def tl_hand_display_emoji(hand):
+    return " ".join([tl_get_card_emoji(c) for c in hand])
+
+async def start_tienlen_full(room_id: str, thread: discord.Thread):
+    room = room_manager.get_room(room_id)
+    if not room:
+        return
+    
+    players = room["players"]
+    bet_amount = room["betAmount"]
+    num_players = len(players)
+    
+    deck = TienLenDeck()
+    hands = deck.deal(num_players)
+    
+    player_hands = {}
+    for i, player_id in enumerate(players):
+        player_hands[player_id] = hands[i]
+    
+    # Find who has 3♠ (starts first)
+    first_player = None
+    for player_id, hand in player_hands.items():
+        if ("3", "♠") in hand:
+            first_player = player_id
+            break
+    
+    if not first_player:
+        first_player = random.choice(players)
+    
+    # Send bài to each player via DM
+    for player_id in players:
+        member = thread.guild.get_member(int(player_id))
+        if member:
+            hand_display = tl_hand_display_emoji(player_hands[player_id])
+            embed = create_embed(
+                title="🀄 Bài của bạn - Tiến Lên",
+                description=f"**Bài của bạn:**\n{hand_display}\n\n"
+                           f"**Số lá:** {len(player_hands[player_id])}/13\n"
+                           f"**Thứ tự:** Cơ ♥ > Rô ♦ > Chuồng ♣ > Bích ♠\n\n"
+                           f"🎯 <@{first_player}> đi trước (có 3♠)",
+                color=COLOR_PURPLE
+            )
+            try:
+                await member.send(embed=embed)
+                await member.send(f"🔗 Quay lại phòng: {thread.mention}")
+            except:
+                # Fallback: send in thread with spoiler tag
+                await thread.send(f"📩 <@{player_id}> **Bài của bạn:** ||{hand_display}|| (Click để xem)", delete_after=30)
+    
+    # Game announcement
+    await thread.send(f"🀄 **TIẾN LÊN MIỀN NAM**\n\n"
+                     f"👤 {num_players} người chơi\n"
+                     f"🎯 <@{first_player}> đi trước (có 3♠)\n"
+                     f"📩 Bài đã được gửi qua DM!\n"
+                     f"⏰ Mỗi lượt có 60 giây.\n"
+                     f"📋 Thứ tự: **Cơ ♥ > Rô ♦ > Chuồng ♣ > Bích ♠**")
+    
+    # Calculate rankings based on card strength
+    rankings = {}
+    hand_strengths = []
+    for player_id, hand in player_hands.items():
+        strength = sum(tl_card_sort_key(c)[0] * 4 + tl_card_sort_key(c)[1] for c in hand)
+        hand_strengths.append((player_id, strength, hand))
+    
+    hand_strengths.sort(key=lambda x: x[1], reverse=True)
+    
+    total_pool = int(bet_amount * num_players * 0.95)
+    rewards = []
+    if num_players == 2:
+        rewards = [int(total_pool * 0.7), int(total_pool * 0.3)]
+    elif num_players == 3:
+        rewards = [int(total_pool * 0.6), int(total_pool * 0.3), int(total_pool * 0.1)]
+    else:
+        rewards = [int(total_pool * 0.5), int(total_pool * 0.3), int(total_pool * 0.15), int(total_pool * 0.05)]
+    
+    for i, (player_id, strength, hand) in enumerate(hand_strengths):
+        reward = rewards[i] if i < len(rewards) else 0
+        rankings[player_id] = {"hand": tl_hand_display_emoji(hand), "reward": reward}
+        if reward > 0:
+            await add_win(player_id, reward)
+    
+    description = "🀄 **KẾT QUẢ TIẾN LÊN**\n\n"
+    medals = ["🥇 Hạng 1", "🥈 Hạng 2", "🥉 Hạng 3", "💀 Hạng 4"]
+    for i, (player_id, _, _) in enumerate(hand_strengths):
+        r = rankings[player_id]
+        description += f"{medals[i] if i < 4 else f'{i+1}.'}: <@{player_id}>\n"
+        description += f"💰 {r['reward']:,} VNĐ\n\n"
+    
+    description += "📩 Kiểm tra DM để xem bài của bạn!\n\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
+    
+    embed = create_embed(title="🏆 Kết Quả Tiến Lên", description=description, color=COLOR_PURPLE)
+    await thread.send(embed=embed)
+    await asyncio.sleep(15)
+    await end_game_and_cleanup(room_id, thread, {"rankings": rankings})
+
+# ============================================
 # ROOM GAME FUNCTIONS
 # ============================================
 async def start_taixiu_pvp(room_id: str, thread: discord.Thread):
@@ -960,14 +1307,6 @@ async def start_taixiu_pvp(room_id: str, thread: discord.Thread):
     await asyncio.sleep(15)
     await end_game_and_cleanup(room_id, thread, {"rankings": rankings})
 
-async def start_blackjack_game(room_id: str, thread: discord.Thread):
-    await thread.send("🃏 Blackjack đang phát triển... Sẽ ra mắt sớm!")
-    await end_game_and_cleanup(room_id, thread, {"rankings": {}})
-
-async def start_tienlen_game(room_id: str, thread: discord.Thread):
-    await thread.send("🀄 Tiến Lên đang phát triển... Sẽ ra mắt sớm!")
-    await end_game_and_cleanup(room_id, thread, {"rankings": {}})
-
 async def auto_close_room(room_id: str, thread: discord.Thread, timeout: int):
     await asyncio.sleep(timeout)
     room = room_manager.get_room(room_id)
@@ -976,6 +1315,23 @@ async def auto_close_room(room_id: str, thread: discord.Thread, timeout: int):
             await add_win(player_id, room["betAmount"])
         try:
             await thread.send("⏰ Phòng đã hết hạn do không đủ người chơi.\n💰 Tiền cược đã được hoàn trả.")
+        except:
+            pass
+        await asyncio.sleep(3)
+        await cleanup_and_delete_room(room_id, thread)
+
+async def auto_close_room_with_public(room_id: str, thread: discord.Thread, public_msg: discord.Message, timeout: int):
+    await asyncio.sleep(timeout)
+    room = room_manager.get_room(room_id)
+    if room and room["status"] == RoomStatus.WAITING:
+        for player_id in room["players"]:
+            await add_win(player_id, room["betAmount"])
+        try:
+            await thread.send("⏰ Phòng đã hết hạn do không đủ người chơi.\n💰 Tiền cược đã được hoàn trả.")
+        except:
+            pass
+        try:
+            await public_msg.delete()
         except:
             pass
         await asyncio.sleep(3)
@@ -1000,15 +1356,6 @@ async def end_game_and_cleanup(room_id: str, thread: discord.Thread, results: Di
         return
     
     room_manager.set_room_status(room_id, RoomStatus.FINISHED)
-    
-    description = "🏆 **KẾT QUẢ TRẬN ĐẤU**\n\n"
-    for i, (player_id, data) in enumerate(results.get("rankings", {}).items()):
-        medal = ["🥇", "🥈", "🥉", "💀"][i] if i < 4 else f"{i+1}."
-        description += f"{medal} <@{player_id}> - {data.get('reward', 0):,} VNĐ\n"
-    description += f"\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
-    
-    embed = create_embed(title="🏆 Trận Đấu Kết Thúc", description=description, color=COLOR_GOLD)
-    await thread.send(embed=embed)
     
     db.collection("room_history").add({
         "roomId": room_id,
@@ -1798,21 +2145,28 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
     await msg.edit(embed=embed)
 
 # ============================================
-# CREATE ROOM COMMAND
+# CREATE ROOM COMMAND - PRIVATE THREAD + PUBLIC INVITE
 # ============================================
-@bot.tree.command(name="taophong", description="🏠 Tạo phòng chơi game")
+@bot.tree.command(name="taophong", description="🏠 Tạo phòng chơi game riêng tư")
 @app_commands.describe(game="Chọn game muốn chơi", bet="Số tiền cược mỗi người")
 @app_commands.choices(game=[
     app_commands.Choice(name="🎲 Tài Xỉu Đối Kháng", value="taixiu"),
-    app_commands.Choice(name="🃏 Blackjack", value="blackjack"),
-    app_commands.Choice(name="🀄 Tiến Lên", value="tienlen"),
+    app_commands.Choice(name="🃏 Blackjack (21 điểm)", value="blackjack"),
+    app_commands.Choice(name="🀄 Tiến Lên Miền Nam", value="tienlen"),
 ])
 async def taophong(interaction: discord.Interaction, game: str, bet: str):
     user_id = str(interaction.user.id)
     
     existing_room = room_manager.get_player_room(user_id)
     if existing_room:
-        await interaction.response.send_message("❌ Bạn đang sở hữu hoặc tham gia một phòng khác.\nVui lòng kết thúc hoặc rời phòng hiện tại trước khi tạo phòng mới.", ephemeral=True)
+        room = room_manager.get_room(existing_room)
+        if room:
+            await interaction.response.send_message(
+                f"❌ Bạn đang ở phòng khác!\n"
+                f"📋 Game: **{room.get('gameType', 'N/A')}**\n"
+                f"Vui lòng rời phòng hiện tại trước.",
+                ephemeral=True
+            )
         return
     
     try:
@@ -1835,27 +2189,145 @@ async def taophong(interaction: discord.Interaction, game: str, bet: str):
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    game_names = {"taixiu": "🎲 Tài Xỉu", "blackjack": "🃏 Blackjack", "tienlen": "🀄 Tiến Lên"}
-    thread_name = f"{game_names[game]} - {interaction.user.name}"
+    game_names = {"taixiu": "🎲 Tài Xỉu Đối Kháng", "blackjack": "🃏 Blackjack", "tienlen": "🀄 Tiến Lên Miền Nam"}
+    game_emoji = {"taixiu": "🎲", "blackjack": "🃏", "tienlen": "🀄"}
     
-    thread = await interaction.channel.create_thread(name=thread_name, type=discord.ChannelType.public_thread, auto_archive_duration=60)
+    # Create PRIVATE thread
+    thread = await interaction.channel.create_thread(
+        name=f"{game_emoji[game]} {game_names[game]} - {interaction.user.name}",
+        type=discord.ChannelType.private_thread,
+        auto_archive_duration=60
+    )
+    
+    await thread.add_user(interaction.user)
     
     room_id = f"{interaction.guild.id}_{thread.id}"
     room_manager.create_room(user_id, room_id, game, thread, bet_amount)
     
-    view = RoomView(room_id, user_id, bet_amount, game)
-    room_manager.store_view(room_id, view)
+    # Public invite view
+    invite_view = RoomInviteView(room_id, thread.id, bet_amount, game, game_names[game])
     
-    embed = create_embed(
+    invite_embed = create_embed(
+        title=f"{game_emoji[game]} PHÒNG {game_names[game].upper()}",
+        description=f"**Chủ phòng:** {interaction.user.mention}\n"
+                   f"**Game:** {game_names[game]}\n"
+                   f"**Tiền cược:** {bet_amount:,} VNĐ/người\n"
+                   f"**Slots:** 2-4 người\n\n"
+                   f"👤 **Người chơi (1/4):**\n"
+                   f"1. {interaction.user.mention}\n\n"
+                   f"🔒 Phòng riêng tư - Nhấn nút để tham gia!\n"
+                   f"⏰ Tự đóng sau 5 phút nếu không đủ người.",
+        color=COLOR_GOLD,
+        thumbnail_url=interaction.user.display_avatar.url
+    )
+    
+    public_msg = await interaction.channel.send(embed=invite_embed, view=invite_view)
+    
+    room = room_manager.get_room(room_id)
+    if room:
+        room["publicMessageId"] = public_msg.id
+    
+    thread_embed = create_embed(
         title=f"🏠 Phòng {game_names[game]}",
-        description=f"**Chủ phòng:** {interaction.user.mention}\n**Game:** {game_names[game]}\n**Tiền cược:** {bet_amount:,} VNĐ/người\n\n👤 **Người chơi (1/4):**\n1. {interaction.user.mention}\n\n⏰ Phòng sẽ tự đóng sau 5 phút nếu không đủ người!",
+        description=f"**Chủ phòng:** {interaction.user.mention}\n"
+                   f"**Game:** {game_names[game]}\n"
+                   f"**Tiền cược:** {bet_amount:,} VNĐ/người\n\n"
+                   f"👤 **Người chơi (1/4):**\n"
+                   f"1. {interaction.user.mention}\n\n"
+                   f"🔒 Phòng riêng tư\n"
+                   f"⏰ Tự đóng sau 5 phút nếu không đủ người!",
         color=COLOR_GOLD
     )
     
-    await thread.send(embed=embed, view=view)
-    await interaction.response.send_message(f"✅ Đã tạo phòng tại {thread.mention}!", ephemeral=True)
+    view = RoomView(room_id, user_id, bet_amount, game)
+    room_manager.store_view(room_id, view)
     
-    asyncio.create_task(auto_close_room(room_id, thread, 300))
+    await thread.send(embed=thread_embed, view=view)
+    await interaction.response.send_message(f"✅ Đã tạo phòng riêng tư tại {thread.mention}!\n📢 Tin nhắn mời đã được gửi công khai.", ephemeral=True)
+    
+    asyncio.create_task(auto_close_room_with_public(room_id, thread, public_msg, 300))
+
+class RoomInviteView(discord.ui.View):
+    """Public invite button - anyone can click to join"""
+    def __init__(self, room_id: str, thread_id: int, bet_amount: int, game_type: str, game_name: str):
+        super().__init__(timeout=300)
+        self.room_id = room_id
+        self.thread_id = thread_id
+        self.bet_amount = bet_amount
+        self.game_type = game_type
+        self.game_name = game_name
+    
+    @discord.ui.button(label="Tham Gia Phòng", style=discord.ButtonStyle.success, emoji="🚪")
+    async def join_room(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        existing = room_manager.get_player_room(user_id)
+        if existing:
+            await interaction.response.send_message("❌ Bạn đang ở phòng khác!", ephemeral=True)
+            return
+        
+        user_data = await create_user_if_not_exists(user_id)
+        if user_data["balance"] < self.bet_amount:
+            await interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.bet_amount:,} VNĐ", ephemeral=True)
+            return
+        
+        room = room_manager.get_room(self.room_id)
+        if not room or room["status"] != RoomStatus.WAITING:
+            await interaction.response.send_message("❌ Phòng đã đóng hoặc đã bắt đầu!", ephemeral=True)
+            return
+        
+        if len(room["players"]) >= 4:
+            await interaction.response.send_message("❌ Phòng đã đầy!", ephemeral=True)
+            return
+        
+        success = await deduct_bet(user_id, self.bet_amount)
+        if not success:
+            await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
+            return
+        
+        # Add to private thread
+        thread = interaction.guild.get_thread(self.thread_id)
+        if thread:
+            await thread.add_user(interaction.user)
+        
+        room_manager.join_room(user_id, self.room_id)
+        
+        # Update public message
+        room = room_manager.get_room(self.room_id)
+        if room:
+            players_text = "\n".join([f"{i+1}. <@{pid}>" for i, pid in enumerate(room["players"])])
+            embed = interaction.message.embeds[0]
+            embed.description = embed.description.split("👤")[0] + f"👤 **Người chơi ({len(room['players'])}/4):**\n{players_text}\n\n🔒 Phòng riêng tư - Nhấn nút để tham gia!\n⏰ Tự đóng sau 5 phút nếu không đủ người."
+            await interaction.message.edit(embed=embed)
+            
+            # Update thread message
+            if thread:
+                async for msg in thread.history(limit=10):
+                    if msg.embeds and "Phòng" in msg.embeds[0].title:
+                        thread_embed = msg.embeds[0]
+                        thread_embed.description = thread_embed.description.split("👤")[0] + f"👤 **Người chơi ({len(room['players'])}/4):**\n{players_text}\n\n🔒 Phòng riêng tư"
+                        await msg.edit(embed=thread_embed)
+                        break
+        
+        await interaction.response.send_message(f"✅ Đã tham gia phòng {self.game_name}! Vào <#{self.thread_id}> để chơi.", ephemeral=True)
+        
+        # Auto start if enough players
+        if room and len(room["players"]) >= 2:
+            await asyncio.sleep(2)
+            updated_room = room_manager.get_room(self.room_id)
+            if updated_room and len(updated_room["players"]) >= 2 and updated_room["status"] == RoomStatus.WAITING:
+                room_manager.set_room_status(self.room_id, RoomStatus.PLAYING)
+                if thread:
+                    if self.game_type == "taixiu":
+                        await start_taixiu_pvp(self.room_id, thread)
+                    elif self.game_type == "blackjack":
+                        await start_blackjack_full(self.room_id, thread)
+                    elif self.game_type == "tienlen":
+                        await start_tienlen_full(self.room_id, thread)
+                try:
+                    await interaction.message.delete()
+                except:
+                    pass
 
 class RoomView(discord.ui.View):
     def __init__(self, room_id: str, owner_id: str, bet_amount: int, game_type: str):
@@ -1949,9 +2421,9 @@ class RoomView(discord.ui.View):
         if self.game_type == "taixiu":
             await start_taixiu_pvp(self.room_id, interaction.channel)
         elif self.game_type == "blackjack":
-            await start_blackjack_game(self.room_id, interaction.channel)
+            await start_blackjack_full(self.room_id, interaction.channel)
         elif self.game_type == "tienlen":
-            await start_tienlen_game(self.room_id, interaction.channel)
+            await start_tienlen_full(self.room_id, interaction.channel)
 
 # ============================================
 # GAME: COINFLIP
