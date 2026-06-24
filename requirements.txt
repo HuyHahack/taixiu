@@ -2,3 +2,5 @@ discord.py==2.3.2
 python-dotenv==1.0.0
 firebase-admin==6.2.0
 aiohttp==3.9.1
+matplotlib==3.8.2
+numpy==1.26.3
