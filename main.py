@@ -1,4 +1,4 @@
-# ============================================
+
 # DISCORD CASINO BOT - COMPLETE PRODUCTION CODE
 # Python 3.12 + discord.py 2.x + Firebase
 # ============================================
@@ -37,7 +37,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-# Khai báo bot sớm nhất có thể để tránh mọi lỗi NameError khi đăng ký lệnh
+# Khai báo bot tại đầu tệp để tránh mọi lỗi NameError
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ============================================
@@ -225,10 +225,7 @@ class RoomManager:
             "custom_bets": {owner_id: bet_amount} if game_type == "blackjack" else {}
         }
         
-        db.collection("rooms").document(room_id).set({
-            "room_data": room_data,
-            "room_state": self.room_states[room_id]
-        })
+        self.save_room_state_to_db(room_id)
         return True
     
     def join_room(self, user_id: str, room_id: str, custom_bet: Optional[int] = None) -> bool:
@@ -1103,6 +1100,22 @@ def tl_can_beat(new_combo: Tuple[str, bool, int], current_combo: Tuple[str, bool
         
     return False
 
+class TienLenDeck:
+    def __init__(self):
+        self.cards = []
+        self.reset()
+    def reset(self):
+        self.cards = [(rank, suit) for suit in TL_SUITS for rank in TL_RANKS]
+        random.shuffle(self.cards)
+    def deal(self, num_players: int):
+        cards_per = 52 // num_players
+        hands = []
+        for _ in range(num_players):
+            hand = sorted(self.cards[:cards_per], key=tl_card_sort_key)
+            self.cards = self.cards[cards_per:]
+            hands.append(hand)
+        return hands
+
 async def start_tienlen_full(room_id: str, thread: discord.Thread):
     room = room_manager.get_room(room_id)
     if not room: return
@@ -1335,7 +1348,7 @@ class TLEphemeralControlView(discord.ui.View):
             
         state["pass_count"] += 1
         state["action_done"] = True
-        room_manager.save_room_state_to_db(self.room_id)
+        room_manager.save_room_state_to_db(room_id)
         
         embed = create_embed(title="⏭️ ĐÃ BỎ LƯỢT", description="Bạn đã bỏ lượt chơi của vòng này.", color=COLOR_WARNING)
         await interaction.response.edit_message(embed=embed, view=None)
@@ -2667,7 +2680,26 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # ============================================
 # WEB SERVER SETUP & INITS
 # ============================================
+async def health_check(request):
+    """Xử lý yêu cầu kiểm tra trạng thái hoạt động của Bot"""
+    return web.Response(
+        text=json.dumps({
+            "status": "online", 
+            "bot": str(bot.user) if bot.user else "Starting...", 
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }), 
+        content_type="application/json"
+    )
+
+async def dashboard(request):
+    """Trang chủ hiển thị trạng thái hoạt động"""
+    return web.Response(
+        text="<h1>🎰 Discord Casino Bot is Running Perfectly</h1>", 
+        content_type="text/html"
+    )
+
 async def start_web_server():
+    """Khởi tạo và lắng nghe cổng HTTP cho Web Server"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', dashboard)
@@ -2685,7 +2717,13 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("❌ DISCORD_TOKEN trống, dừng bot!")
         exit(1)
+    
+    # Định nghĩa tiến trình nạp Web Server vào Discord.py setup_hook
     @bot.event
-    async def setup_hook(): await start_web_server()
-    try: bot.run(DISCORD_TOKEN)
-    except Exception as e: print(f"❌ Lỗi khởi chạy ứng dụng: {e}")
+    async def setup_hook(): 
+        await start_web_server()
+        
+    try: 
+        bot.run(DISCORD_TOKEN)
+    except Exception as e: 
+        print(f"❌ Lỗi khởi chạy ứng dụng: {e}")
