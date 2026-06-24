@@ -1,4 +1,4 @@
-
+# ============================================
 # DISCORD CASINO BOT - COMPLETE PRODUCTION CODE
 # Python 3.12 + discord.py 2.x + Firebase
 # ============================================
@@ -366,7 +366,8 @@ async def log_error(error_type: str, command: str, user_id: str, error: str, tra
 @firestore.transactional
 def _tx_transfer(transaction, from_id: str, to_id: str, amount: int) -> bool:
     from_ref, to_ref = get_user_ref(from_id), get_user_ref(to_id)
-    from_snap, to_snap = transaction.get(from_ref), transaction.get(to_ref)
+    from_snap = from_ref.get(transaction=transaction)
+    to_snap = to_ref.get(transaction=transaction)
     if not from_snap.exists or not to_snap.exists: return False
     from_data, to_data = from_snap.to_dict(), to_snap.to_dict()
     if from_data.get("balance", 0) < amount: return False
@@ -377,7 +378,7 @@ def _tx_transfer(transaction, from_id: str, to_id: str, amount: int) -> bool:
 @firestore.transactional
 def _tx_adjust_balance(transaction, user_id: str, amount: int) -> bool:
     user_ref = get_user_ref(user_id)
-    user_snap = transaction.get(user_ref)
+    user_snap = user_ref.get(transaction=transaction)
     if not user_snap.exists: return False
     user_data = user_snap.to_dict()
     new_balance = user_data.get("balance", 0) + amount
@@ -388,7 +389,7 @@ def _tx_adjust_balance(transaction, user_id: str, amount: int) -> bool:
 @firestore.transactional
 def _tx_jackpot_add(transaction, amount: int):
     jackpot_ref = db.collection("system").document("jackpot")
-    jackpot_snap = transaction.get(jackpot_ref)
+    jackpot_snap = jackpot_ref.get(transaction=transaction)
     current = jackpot_snap.to_dict().get("amount", 0) if jackpot_snap.exists else 0
     transaction.set(jackpot_ref, {"amount": current + amount}, merge=True)
 
@@ -399,7 +400,10 @@ async def transfer_money(from_id: str, to_id: str, amount: int, transaction_type
             await add_log(transaction_type, from_id, amount, to_id)
             await add_transaction(transaction_type, from_id, amount, to_id)
         return result
-    except Exception as e: return False
+    except Exception as e: 
+        print(f"❌ Transaction transfer error: {e}")
+        traceback.print_exc()
+        return False
 
 async def add_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
     try:
@@ -408,7 +412,10 @@ async def add_money(user_id: str, amount: int, admin_id: str = "system") -> bool
             await add_log("addmoney", user_id, amount, admin_id)
             await add_transaction("addmoney", user_id, amount, admin_id)
         return result
-    except Exception as e: return False
+    except Exception as e: 
+        print(f"❌ Transaction add money error: {e}")
+        traceback.print_exc()
+        return False
 
 async def remove_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
     try:
@@ -417,7 +424,10 @@ async def remove_money(user_id: str, amount: int, admin_id: str = "system") -> b
             await add_log("trutien", user_id, amount, admin_id)
             await add_transaction("trutien", user_id, -amount, admin_id)
         return result
-    except Exception as e: return False
+    except Exception as e: 
+        print(f"❌ Transaction remove money error: {e}")
+        traceback.print_exc()
+        return False
 
 async def deduct_bet(user_id: str, amount: int) -> bool:
     try:
@@ -425,13 +435,20 @@ async def deduct_bet(user_id: str, amount: int) -> bool:
         if result:
             jackpot_amount = int(amount * 0.02)
             try: _tx_jackpot_add(db.transaction(), jackpot_amount)
-            except: pass
+            except Exception as j_err:
+                print(f"❌ Jackpot add error: {j_err}")
         return result
-    except Exception as e: return False
+    except Exception as e: 
+        print(f"❌ Transaction deduct bet error: {e}")
+        traceback.print_exc()
+        return False
 
 async def add_win(user_id: str, amount: int) -> bool:
     try: return _tx_adjust_balance(db.transaction(), user_id, amount)
-    except Exception as e: return False
+    except Exception as e: 
+        print(f"❌ Transaction add win error: {e}")
+        traceback.print_exc()
+        return False
 
 async def get_jackpot() -> int:
     doc = db.collection("system").document("jackpot").get()
@@ -898,7 +915,7 @@ class BJControlPanelView(discord.ui.View):
         state["player_done"][self.player_id] = True
         hand = state["player_hands"][self.player_id]
         pts = calculate_hand(hand)
-        room_manager.save_room_state_to_db(self.room_id)
+        room_manager.save_room_state_to_db(room_id)
         
         embed = create_embed(title="✋ BẠN ĐÃ STAND", description=f"Bài của bạn: {hand_str(hand)} (Điểm: {pts})", color=COLOR_GOLD)
         await interaction.response.edit_message(embed=embed, view=None)
