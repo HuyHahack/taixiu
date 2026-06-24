@@ -31,6 +31,16 @@ from enum import Enum
 warnings.filterwarnings('ignore')
 
 # ============================================
+# DISCORD BOT GLOBAL INITIALIZATION
+# ============================================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+# Khai báo bot sớm nhất có thể để tránh mọi lỗi NameError khi đăng ký lệnh
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+# ============================================
 # LOAD ENVIRONMENT VARIABLES
 # ============================================
 load_dotenv()
@@ -127,7 +137,7 @@ BADGE_CAO_THU = 500
 BADGE_STREAK_GOD = 20
 
 # ============================================
-# RATE LIMITER & COOLDOWN
+# RATE LIMITER & COOLDOWN CLASS
 # ============================================
 class RateLimiter:
     def __init__(self):
@@ -215,7 +225,10 @@ class RoomManager:
             "custom_bets": {owner_id: bet_amount} if game_type == "blackjack" else {}
         }
         
-        self.save_room_state_to_db(room_id)
+        db.collection("rooms").document(room_id).set({
+            "room_data": room_data,
+            "room_state": self.room_states[room_id]
+        })
         return True
     
     def join_room(self, user_id: str, room_id: str, custom_bet: Optional[int] = None) -> bool:
@@ -1090,22 +1103,6 @@ def tl_can_beat(new_combo: Tuple[str, bool, int], current_combo: Tuple[str, bool
         
     return False
 
-class TienLenDeck:
-    def __init__(self):
-        self.cards = []
-        self.reset()
-    def reset(self):
-        self.cards = [(rank, suit) for suit in TL_SUITS for rank in TL_RANKS]
-        random.shuffle(self.cards)
-    def deal(self, num_players: int):
-        cards_per = 52 // num_players
-        hands = []
-        for _ in range(num_players):
-            hand = sorted(self.cards[:cards_per], key=tl_card_sort_key)
-            self.cards = self.cards[cards_per:]
-            hands.append(hand)
-        return hands
-
 async def start_tienlen_full(room_id: str, thread: discord.Thread):
     room = room_manager.get_room(room_id)
     if not room: return
@@ -1766,7 +1763,28 @@ class MinesGameView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 # ============================================
-# ECONOMY COMMANDS
+# COMMAND COOLDOWN DECORATOR UTILITY
+# ============================================
+def check_cooldown(command_name: str, cooldown_seconds: int):
+    async def predicate(interaction: discord.Interaction) -> bool:
+        user_id = str(interaction.user.id)
+        is_on_cooldown, remaining = cooldown_manager.check_cooldown(user_id, command_name, cooldown_seconds)
+        if is_on_cooldown:
+            hours, minutes, seconds = remaining // 3600, (remaining % 3600) // 60, remaining % 60
+            time_str = f"{hours} giờ " if hours > 0 else ""
+            time_str += f"{minutes} phút " if minutes > 0 else ""
+            time_str += f"{seconds} giây" if seconds > 0 else ""
+            await interaction.response.send_message(f"⏰ Vui lòng đợi {time_str.strip()} để sử dụng lệnh này!", ephemeral=True)
+            return False
+        has_overdue, _ = await check_loans_overdue(user_id)
+        if has_overdue:
+            await interaction.response.send_message("⚠️ Bạn có khoản nợ quá hạn! Hãy trả nợ trước khi sử dụng lệnh này.\nDùng `/nolist` để xem danh sách nợ.", ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
+
+# ============================================
+# ECONOMY SLASH COMMANDS
 # ============================================
 @bot.tree.command(name="sodu", description="💰 Xem số dư tài khoản của bạn")
 @check_cooldown("sodu", COOLDOWN_NORMAL)
@@ -1973,7 +1991,7 @@ async def shop(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=ShopView(), ephemeral=True)
 
 # ============================================
-# LOAN SYSTEM & COMMANDS
+# LOAN SYSTEM & SLASH COMMANDS
 # ============================================
 @bot.tree.command(name="vay", description="💳 Đề xuất vay tiền từ người chơi khác")
 @app_commands.describe(user="Người bạn muốn vay", amount="Số tiền đề xuất vay")
@@ -2280,18 +2298,8 @@ async def choilodit(interaction: discord.Interaction, user: discord.User):
     else: await interaction.response.send_message("❌ Lỗi giao dịch trêu chọc!", ephemeral=True)
 
 # ============================================
-# SPECTATE & GENERAL COMMANDS
+# GAME: MINES
 # ============================================
-@bot.tree.command(name="spectate", description="👀 Theo dõi diễn biến trận đấu đang diễn ra")
-@app_commands.describe(room_id="Mã ID phòng chơi đang hoạt động")
-async def spectate(interaction: discord.Interaction, room_id: str):
-    room = room_manager.get_room(room_id)
-    if not room:
-        await interaction.response.send_message("❌ Phòng chơi này không tồn tại hoặc đã đóng!", ephemeral=True)
-        return
-    embed = create_embed(title="👀 Spectator Mode", description="Nhấn nút bên dưới để làm mới diễn biến trận đấu hiện tại mà không nhìn thấy bài của người chơi.", color=COLOR_INFO)
-    await interaction.response.send_message(embed=embed, view=SpectatorView(room_id), ephemeral=True)
-
 @bot.tree.command(name="mines", description="💣 Trò chơi dò mìn Mines cực kỳ hấp dẫn")
 @app_commands.describe(bet="Số tiền cược", mines_count="Số lượng mìn trên bản đồ (1-24)")
 async def mines(interaction: discord.Interaction, bet: int, mines_count: int):
@@ -2315,6 +2323,19 @@ async def mines(interaction: discord.Interaction, bet: int, mines_count: int):
     view = MinesGameView(user_id, bet, mines_count)
     embed = create_embed(title="💎 MINES GAME STARTED", description=f"Người chơi: <@{user_id}>\nCược: **{bet:,}** VNĐ | Số mìn: **{mines_count}**\nHãy lật các ô và tránh bom!", color=COLOR_INFO)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# ============================================
+# SPECTATE & GENERAL COMMANDS
+# ============================================
+@bot.tree.command(name="spectate", description="👀 Theo dõi diễn biến trận đấu đang diễn ra")
+@app_commands.describe(room_id="Mã ID phòng chơi đang hoạt động")
+async def spectate(interaction: discord.Interaction, room_id: str):
+    room = room_manager.get_room(room_id)
+    if not room:
+        await interaction.response.send_message("❌ Phòng chơi này không tồn tại hoặc đã đóng!", ephemeral=True)
+        return
+    embed = create_embed(title="👀 Spectator Mode", description="Nhấn nút bên dưới để làm mới diễn biến trận đấu hiện tại mà không nhìn thấy bài của người chơi.", color=COLOR_INFO)
+    await interaction.response.send_message(embed=embed, view=SpectatorView(room_id), ephemeral=True)
 
 # ============================================
 # ADMINISTRATIVE COMMANDS
@@ -2371,7 +2392,7 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
         async def claim(self, button_interaction: discord.Interaction, button: discord.ui.Button):
             u_id = str(button_interaction.user.id)
             if u_id in self.claimed:
-                await button_interaction.response.send_message("❌ Bạn đã nhận lì xì trước đó rồi!", ephemeral=True)
+                await button_interaction.response.send_message("❌ Bạn đã nhận lì xì rồi!", ephemeral=True)
                 return
             await create_user_if_not_exists(u_id)
             await add_money(u_id, amount, str(interaction.user.id))
@@ -2433,6 +2454,21 @@ async def addmoney_cmd(interaction: discord.Interaction, user: discord.User, amo
     if await add_money(str(user.id), amount, str(interaction.user.id)):
         await interaction.response.send_message(f"✅ Đã thêm **{amount:,}** VNĐ cho **{user.name}** thành công.")
     else: await interaction.response.send_message("❌ Giao dịch lỗi!", ephemeral=True)
+
+@bot.tree.command(name="jackpot", description="🎰 Xem giải Jackpot hiện tại")
+@check_cooldown("jackpot", COOLDOWN_NORMAL)
+async def jackpot_cmd(interaction: discord.Interaction):
+    try:
+        amount = await get_jackpot()
+        embed = create_embed(
+            title="🎰 JACKPOT",
+            description=f"**Giải thưởng hiện tại:** {amount:,} VNĐ\n\n📊 2% từ mỗi game được cộng vào Jackpot!\n🎯 Jackpot sẽ được trao ngẫu nhiên cho người chơi may mắn!",
+            color=COLOR_GOLD
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await log_error("jackpot", "jackpot", str(interaction.user.id), str(e), traceback.format_exc())
+        await interaction.response.send_message("❌ Lỗi xem jackpot!", ephemeral=True)
 
 # ============================================
 # ACTIVE COLD ROOM RECOVERY ON STARTUP
@@ -2548,6 +2584,9 @@ async def cleanup_and_delete_room(room_id: str, thread: discord.Thread):
     try: await thread.delete()
     except: pass
 
+# ============================================
+# CREATE ROOM COMMAND (No Auto-Start)
+# ============================================
 @bot.tree.command(name="taophong", description="🏠 Tạo phòng chơi game riêng tư")
 @app_commands.describe(game="Chọn game muốn chơi", bet="Số tiền cược")
 @app_commands.choices(game=[
@@ -2607,24 +2646,27 @@ async def auto_close_room_with_public(room_id: str, thread: discord.Thread, publ
         await cleanup_and_delete_room(room_id, thread)
 
 # ============================================
-# BOT READY & WEB SERVER HOOK
+# EXCEPTION COMMAND HANDLER
 # ============================================
-@bot.event
-async def on_ready():
-    print(f"✅ Đăng nhập bot Discord thành công: {bot.user.name} ({bot.user.id})")
-    await restore_rooms()
-    asyncio.create_task(auto_backup())
-    try:
-        synced = await bot.tree.sync()
-        print(f"🔄 Đã đồng bộ thành công {len(synced)} lệnh Slash Commands.")
-    except Exception as e: print(f"❌ Không thể đồng bộ hóa lệnh: {e}")
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{len(bot.guilds)} máy chủ | /help"))
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    user_id = str(interaction.user.id)
+    command_name = interaction.command.name if interaction.command else "unknown"
+    if isinstance(error, app_commands.errors.CommandOnCooldown):
+        await interaction.response.send_message(f"⏰ Vui lòng đợi {error.retry_after:.0f} giây!", ephemeral=True)
+    elif isinstance(error, app_commands.errors.CheckFailure): pass
+    elif isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+    else:
+        tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        await log_error("command_error", command_name, user_id, str(error), tb_str)
+        print(f"❌ Command error [{command_name}]: {error}")
+        try: await interaction.response.send_message("❌ Có lỗi xảy ra! Đội ngũ kỹ thuật đã được thông báo.", ephemeral=True)
+        except: pass
 
-async def health_check(request):
-    return web.Response(text=json.dumps({"status": "online", "bot": str(bot.user), "timestamp": datetime.now(timezone.utc).isoformat()}), content_type="application/json")
-async def dashboard(request):
-    return web.Response(text="<h1>🎰 Discord Casino Bot is Running</h1>", content_type="text/html")
-
+# ============================================
+# WEB SERVER SETUP & INITS
+# ============================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/health', health_check)
@@ -2637,7 +2679,7 @@ async def start_web_server():
     print(f"🌐 Web Server đã bắt đầu hoạt động trên cổng: {port}")
 
 # ============================================
-# BOT LAUNCH
+# BOT LAUNCH TRIGGER
 # ============================================
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
