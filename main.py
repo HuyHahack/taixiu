@@ -18,6 +18,15 @@ from google.cloud.firestore_v1 import Client as FirestoreClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 from aiohttp import web
 from dotenv import load_dotenv
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+from io import BytesIO
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================
 # LOAD ENVIRONMENT VARIABLES
@@ -478,6 +487,258 @@ async def check_and_deduct_coupon(user_id: str) -> bool:
         print(f"📄 Coupon used for {user_id}, remaining: {user_data['discountCouponUses']}")
         return True
     return False
+
+# ============================================
+# CAU CHART GENERATOR
+# ============================================
+def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
+    """Generate professional Tai Xiu statistics chart"""
+    
+    if not game_list:
+        fig, ax = plt.subplots(figsize=(16, 9), dpi=100, facecolor='#1a0a2e')
+        ax.set_facecolor('#1a0a2e')
+        ax.text(0.5, 0.5, 'Chưa có dữ liệu phiên nào!\nHãy chơi Tài Xỉu trước.', 
+                ha='center', va='center', fontsize=24, color='white', transform=ax.transAxes)
+        ax.axis('off')
+        buf = BytesIO()
+        fig.savefig(buf, format='png', facecolor='#1a0a2e', bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+    
+    # Reverse to show oldest first
+    game_list = list(reversed(game_list))
+    
+    results = [g.get('result', 0) for g in game_list]
+    dice1_list = [g.get('dice1', 0) for g in game_list]
+    dice2_list = [g.get('dice2', 0) for g in game_list]
+    dice3_list = [g.get('dice3', 0) for g in game_list]
+    tai_xiu_list = [g.get('taiOrXiu', '') for g in game_list]
+    
+    sessions = list(range(1, len(results) + 1))
+    total_phiens = len(results)
+    
+    # Colors
+    bg_dark = '#0d0520'
+    tai_color = '#FF4444'
+    xiu_color = '#4488FF'
+    gold = '#FFD700'
+    cyan = '#00FFFF'
+    yellow = '#FFFF00'
+    white = '#FFFFFF'
+    
+    # Create figure
+    fig = plt.figure(figsize=(16, 9), dpi=100, facecolor=bg_dark)
+    
+    # Add gradient background
+    gradient = np.linspace(0, 1, 256).reshape(256, 1)
+    gradient = np.hstack([gradient, gradient, gradient])
+    
+    # Create custom layout
+    gs = fig.add_gridspec(4, 4, hspace=0.4, wspace=0.3, 
+                          top=0.93, bottom=0.05, left=0.05, right=0.98)
+    
+    # Title
+    fig.suptitle('🎲 THỐNG KÊ TÀI XỈU', fontsize=20, fontweight='bold', 
+                 color=gold, y=0.98, fontfamily='monospace')
+    
+    # ==========================================
+    # PANEL 1: Current Session Info (Top Right)
+    # ==========================================
+    ax_info = fig.add_subplot(gs[0, 3])
+    ax_info.set_facecolor('#150830')
+    ax_info.axis('off')
+    
+    if total_phiens > 0:
+        last_result = results[-1]
+        last_tai_xiu = tai_xiu_list[-1]
+        last_dice = f"{dice1_list[-1]}-{dice2_list[-1]}-{dice3_list[-1]}"
+        
+        color = tai_color if last_tai_xiu == 'tai' else xiu_color if last_tai_xiu == 'xiu' else gold
+        label = 'TÀI' if last_tai_xiu == 'tai' else 'XỈU' if last_tai_xiu == 'xiu' else 'BỘ BA'
+        
+        ax_info.text(0.5, 0.85, f'Phiên #{total_phiens}', ha='center', fontsize=13, 
+                    color=white, fontweight='bold', fontfamily='monospace')
+        ax_info.text(0.5, 0.5, label, ha='center', fontsize=28, color=color, 
+                    fontweight='bold', fontfamily='monospace')
+        ax_info.text(0.5, 0.2, f'({last_dice})', ha='center', fontsize=11, color='#aaaaaa', 
+                    fontfamily='monospace')
+    
+    # Add border
+    for spine in ax_info.spines.values():
+        spine.set_edgecolor('#3a2a5e')
+        spine.set_linewidth(2)
+    
+    # ==========================================
+    # PANEL 2: Total Score Line Chart
+    # ==========================================
+    ax1 = fig.add_subplot(gs[0:2, 0:3])
+    ax1.set_facecolor('#150830')
+    
+    ax1.plot(sessions, results, color=white, linewidth=2.5, marker='o', 
+             markersize=9, markerfacecolor=gold, markeredgecolor=white,
+             markeredgewidth=1.5, zorder=5)
+    
+    ax1.fill_between(sessions, results, 3, alpha=0.15, color=gold)
+    
+    # Add value labels
+    for i, val in enumerate(results):
+        ax1.annotate(str(val), (sessions[i], val), textcoords="offset points", 
+                    xytext=(0, 12), ha='center', fontsize=8, color=white, 
+                    fontweight='bold', fontfamily='monospace')
+    
+    ax1.set_ylim(2, 19)
+    ax1.set_yticks(range(3, 19))
+    ax1.set_ylabel('Tổng Điểm', color=white, fontsize=10, fontfamily='monospace')
+    ax1.set_xlabel('Phiên', color=white, fontsize=10, fontfamily='monospace')
+    ax1.tick_params(colors=white, labelsize=8)
+    ax1.grid(True, alpha=0.2, linestyle='--', color='white')
+    ax1.set_title('📊 BIỂU ĐỒ TỔNG ĐIỂM', color=gold, fontsize=11, fontweight='bold', 
+                  fontfamily='monospace', pad=8)
+    
+    for spine in ax1.spines.values():
+        spine.set_edgecolor('#3a2a5e')
+        spine.set_linewidth(1)
+    
+    # ==========================================
+    # PANEL 3: Dice Charts
+    # ==========================================
+    ax2 = fig.add_subplot(gs[2, 0:2])
+    ax2.set_facecolor('#150830')
+    
+    ax2.plot(sessions, dice1_list, color='#FF6B6B', linewidth=1.8, marker='s', 
+             markersize=6, markerfacecolor='#FF6B6B', label='Xúc xắc 1')
+    ax2.plot(sessions, dice2_list, color=cyan, linewidth=1.8, marker='^', 
+             markersize=6, markerfacecolor=cyan, label='Xúc xắc 2')
+    ax2.plot(sessions, dice3_list, color=yellow, linewidth=1.8, marker='D', 
+             markersize=6, markerfacecolor=yellow, label='Xúc xắc 3')
+    
+    ax2.set_ylim(0.5, 6.5)
+    ax2.set_yticks(range(1, 7))
+    ax2.set_ylabel('Giá trị', color=white, fontsize=9, fontfamily='monospace')
+    ax2.tick_params(colors=white, labelsize=8)
+    ax2.grid(True, alpha=0.2, linestyle='--', color='white')
+    ax2.legend(loc='upper left', fontsize=8, facecolor='#150830', 
+               edgecolor='#3a2a5e', labelcolor=white)
+    ax2.set_title('🎲 THỐNG KÊ XÚC XẮC', color=gold, fontsize=11, fontweight='bold', 
+                  fontfamily='monospace', pad=8)
+    
+    for spine in ax2.spines.values():
+        spine.set_edgecolor('#3a2a5e')
+        spine.set_linewidth(1)
+    
+    # ==========================================
+    # PANEL 4: Cau Display
+    # ==========================================
+    ax3 = fig.add_subplot(gs[2, 2:])
+    ax3.set_facecolor('#150830')
+    ax3.axis('off')
+    
+    # Display Tai/Xiu sequence
+    ax3.text(0.5, 0.85, '📈 THỐNG KÊ CẦU', ha='center', fontsize=11, color=gold, 
+             fontweight='bold', fontfamily='monospace')
+    
+    # Draw circles for each result
+    n = len(tai_xiu_list)
+    max_per_row = 10
+    rows = (n + max_per_row - 1) // max_per_row
+    
+    y_start = 0.6
+    y_spacing = 0.15
+    
+    for row in range(rows):
+        start_idx = row * max_per_row
+        end_idx = min((row + 1) * max_per_row, n)
+        row_count = end_idx - start_idx
+        
+        x_spacing = 0.9 / row_count
+        y_pos = y_start - row * y_spacing
+        
+        for i, idx in enumerate(range(start_idx, end_idx)):
+            x_pos = 0.1 + i * x_spacing + x_spacing / 2
+            
+            result_type = tai_xiu_list[idx]
+            if result_type == 'tai':
+                color = tai_color
+            elif result_type == 'xiu':
+                color = xiu_color
+            else:
+                color = gold
+            
+            circle = plt.Circle((x_pos, y_pos), 0.025, color=color, transform=ax3.transAxes)
+            ax3.add_patch(circle)
+    
+    # Legend
+    tai_patch = mpatches.Patch(color=tai_color, label='TÀI')
+    xiu_patch = mpatches.Patch(color=xiu_color, label='XỈU')
+    ax3.legend(handles=[tai_patch, xiu_patch], loc='lower center', fontsize=8, 
+               facecolor='#150830', edgecolor='#3a2a5e', labelcolor=white, ncol=2)
+    
+    # ==========================================
+    # PANEL 5: Analysis & Prediction
+    # ==========================================
+    ax4 = fig.add_subplot(gs[3, :])
+    ax4.set_facecolor('#150830')
+    ax4.axis('off')
+    
+    # Calculate stats
+    tai_count = sum(1 for t in tai_xiu_list if t == 'tai')
+    xiu_count = sum(1 for t in tai_xiu_list if t == 'xiu')
+    
+    # Current streak
+    current_streak = 0
+    streak_type = None
+    for t in reversed(tai_xiu_list):
+        if t == 'triple':
+            continue
+        if streak_type is None:
+            streak_type = t
+            current_streak = 1
+        elif t == streak_type:
+            current_streak += 1
+        else:
+            break
+    
+    # Predict
+    if tai_count > xiu_count:
+        prediction = '🔴 TÀI'
+        confidence = 50 + min(15, tai_count - xiu_count)
+    elif xiu_count > tai_count:
+        prediction = '🔵 XỈU'
+        confidence = 50 + min(15, xiu_count - tai_count)
+    else:
+        prediction = random.choice(['🔴 TÀI', '🔵 XỈU'])
+        confidence = 55
+    
+    confidence = min(65, confidence)
+    
+    # Display
+    ax4.text(0.03, 0.85, '📊 PHÂN TÍCH & DỰ ĐOÁN', color=gold, fontsize=13, 
+             fontweight='bold', fontfamily='monospace')
+    
+    ax4.text(0.03, 0.6, f'Tài: {tai_count}/{total_phiens} ({tai_count/total_phiens*100:.0f}%)', 
+             color=white, fontsize=10, fontfamily='monospace')
+    ax4.text(0.03, 0.4, f'Xỉu: {xiu_count}/{total_phiens} ({xiu_count/total_phiens*100:.0f}%)', 
+             color=white, fontsize=10, fontfamily='monospace')
+    
+    streak_text = f'{current_streak} phiên {streak_type} liên tiếp' if streak_type else 'N/A'
+    ax4.text(0.03, 0.2, f'🔥 Chuỗi: {streak_text}', color=white, fontsize=10, 
+             fontfamily='monospace')
+    
+    ax4.text(0.55, 0.6, f'🤖 Dự đoán: {prediction}', color=gold, fontsize=14, 
+             fontweight='bold', fontfamily='monospace')
+    ax4.text(0.55, 0.35, f'Độ tin cậy: {confidence}%', color='#aaaaaa', fontsize=11, 
+             fontfamily='monospace')
+    ax4.text(0.55, 0.15, f'Tỷ lệ đúng: 50-65%', color='#777777', fontsize=8, 
+             fontfamily='monospace')
+    
+    # Save to buffer
+    buf = BytesIO()
+    fig.savefig(buf, format='png', facecolor=bg_dark, bbox_inches='tight', dpi=100)
+    buf.seek(0)
+    plt.close(fig)
+    
+    return buf
 
 # ============================================
 # BOT EVENTS
@@ -1512,6 +1773,39 @@ async def choilodit(interaction: discord.Interaction, user: discord.User):
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Có lỗi xảy ra!", ephemeral=True)
+
+# ============================================
+# CAU COMMAND
+# ============================================
+@bot.tree.command(name="cau", description="📊 Xem biểu đồ thống kê cầu Tài Xỉu")
+@check_cooldown("cau", COOLDOWN_NORMAL)
+async def cau(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    cooldown_manager.set_cooldown(user_id, "cau")
+    
+    # Animation
+    await interaction.response.send_message("⏳ Đang phân tích cầu...")
+    msg = await interaction.original_response()
+    await asyncio.sleep(1)
+    
+    await msg.edit(content="📊 Đang tạo biểu đồ...")
+    await asyncio.sleep(1)
+    
+    await msg.edit(content="🤖 AI đang phân tích...")
+    
+    # Get game history
+    games = get_game_history_ref().order_by("createdAt", direction=firestore.Query.DESCENDING).limit(20).get()
+    game_list = [doc.to_dict() for doc in games]
+    
+    if len(game_list) < 3:
+        await msg.edit(content="❌ Cần ít nhất 3 phiên Tài Xỉu để phân tích! Hãy chơi /taixiu trước.")
+        return
+    
+    # Generate chart
+    buf = generate_cau_chart(game_list)
+    
+    # Send image
+    await msg.edit(content=None, attachments=[discord.File(buf, filename="cau.png")])
 
 # ============================================
 # ADMIN COMMANDS
