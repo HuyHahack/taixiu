@@ -27,7 +27,152 @@ import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
 import warnings
 warnings.filterwarnings('ignore')
+# ============================================
+# ROOM MANAGEMENT SYSTEM
+# ============================================
+import traceback
+from enum import Enum
 
+class RoomStatus(str, Enum):
+    WAITING = "waiting"
+    PLAYING = "playing"
+    FINISHED = "finished"
+
+class RoomGame(str, Enum):
+    TAIXIU = "taixiu"
+    BLACKJACK = "blackjack"
+    TIENLEN = "tienlen"
+
+class RoomManager:
+    """Manages all active game rooms"""
+    
+    def __init__(self):
+        self.active_rooms: Dict[str, Dict] = {}
+        self.player_rooms: Dict[str, str] = {}  # user_id -> room_id
+        self.room_states: Dict[str, Dict] = {}  # room_id -> game state
+        self.room_views: Dict[str, discord.ui.View] = {}  # room_id -> view
+    
+    def create_room(self, owner_id: str, room_id: str, game_type: str, thread: discord.Thread, bet_amount: int) -> bool:
+        """Create a new room. Returns False if player already has a room"""
+        if owner_id in self.player_rooms:
+            return False
+        
+        room_data = {
+            "roomId": room_id,
+            "ownerId": owner_id,
+            "gameType": game_type,
+            "status": RoomStatus.WAITING,
+            "threadId": thread.id,
+            "channelId": thread.parent.id,
+            "guildId": thread.guild.id,
+            "players": [owner_id],
+            "betAmount": bet_amount,
+            "createdAt": datetime.now(timezone.utc),
+            "expiresAt": datetime.now(timezone.utc) + timedelta(minutes=5)
+        }
+        
+        self.active_rooms[room_id] = room_data
+        self.player_rooms[owner_id] = room_id
+        self.room_states[room_id] = {}
+        
+        # Save to Firestore
+        db.collection("active_rooms").document(room_id).set(room_data)
+        
+        return True
+    
+    def join_room(self, user_id: str, room_id: str) -> bool:
+        """Join a room. Returns False if player already in another room"""
+        if room_id not in self.active_rooms:
+            return False
+        if user_id in self.player_rooms:
+            return False
+        
+        room = self.active_rooms[room_id]
+        if room["status"] != RoomStatus.WAITING:
+            return False
+        
+        room["players"].append(user_id)
+        self.player_rooms[user_id] = room_id
+        
+        # Update Firestore
+        db.collection("active_rooms").document(room_id).update({"players": room["players"]})
+        
+        return True
+    
+    def leave_room(self, user_id: str, room_id: str) -> bool:
+        """Leave a room"""
+        if room_id not in self.active_rooms:
+            return False
+        
+        room = self.active_rooms[room_id]
+        if user_id in room["players"]:
+            room["players"].remove(user_id)
+        
+        if user_id in self.player_rooms:
+            del self.player_rooms[user_id]
+        
+        # Update Firestore
+        db.collection("active_rooms").document(room_id).update({"players": room["players"]})
+        
+        return True
+    
+    def get_player_room(self, user_id: str) -> Optional[str]:
+        """Get the room ID that a player is in"""
+        return self.player_rooms.get(user_id)
+    
+    def get_room(self, room_id: str) -> Optional[Dict]:
+        """Get room data"""
+        return self.active_rooms.get(room_id)
+    
+    def set_room_status(self, room_id: str, status: RoomStatus):
+        """Set room status"""
+        if room_id in self.active_rooms:
+            self.active_rooms[room_id]["status"] = status
+            db.collection("active_rooms").document(room_id).update({"status": status})
+    
+    def store_view(self, room_id: str, view: discord.ui.View):
+        """Store view for cleanup"""
+        self.room_views[room_id] = view
+    
+    async def cleanup_room(self, room_id: str):
+        """Full cleanup of a room"""
+        if room_id not in self.active_rooms:
+            return
+        
+        room = self.active_rooms[room_id]
+        
+        # Remove player mappings
+        for player_id in room["players"]:
+            if player_id in self.player_rooms:
+                del self.player_rooms[player_id]
+        
+        # Stop view
+        if room_id in self.room_views:
+            try:
+                view = self.room_views[room_id]
+                view.stop()
+                for item in view.children:
+                    item.disabled = True
+            except:
+                pass
+            del self.room_views[room_id]
+        
+        # Clear state
+        if room_id in self.room_states:
+            del self.room_states[room_id]
+        
+        # Delete from Firestore
+        try:
+            db.collection("active_rooms").document(room_id).delete()
+        except:
+            pass
+        
+        # Remove from memory
+        del self.active_rooms[room_id]
+        
+        print(f"🧹 Cleaned up room: {room_id}")
+
+room_manager = RoomManager()
 # ============================================
 # LOAD ENVIRONMENT VARIABLES
 # ============================================
@@ -1766,6 +1911,12 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
         await add_win(user_id, win_amount)
         result_text = f"🎉 Bạn đã thắng **{win_amount:,} VNĐ**! (x{multiplier})"
         await update_user_stats(user_id, True, bet_amount, win_amount)
+
+
+
+
+
+
     
     # Save game history
     get_game_history_ref().add({
@@ -1791,6 +1942,288 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
         color=COLOR_SUCCESS if win else COLOR_ERROR
     )
     await msg.edit(embed=embed)
+
+
+
+
+
+# ============================================
+# CREATE ROOM COMMAND
+# ============================================
+@bot.tree.command(name="taophong", description="🏠 Tạo phòng chơi game")
+@app_commands.describe(
+    game="Chọn game muốn chơi",
+    bet="Số tiền cược mỗi người"
+)
+@app_commands.choices(game=[
+    app_commands.Choice(name="🎲 Tài Xỉu Đối Kháng", value="taixiu"),
+    app_commands.Choice(name="🃏 Blackjack", value="blackjack"),
+    app_commands.Choice(name="🀄 Tiến Lên", value="tienlen"),
+])
+async def taophong(interaction: discord.Interaction, game: str, bet: str):
+    user_id = str(interaction.user.id)
+    
+    # Check if player already has a room
+    existing_room = room_manager.get_player_room(user_id)
+    if existing_room:
+        await interaction.response.send_message(
+            "❌ Bạn đang sở hữu hoặc tham gia một phòng khác.\n"
+            "Vui lòng kết thúc hoặc rời phòng hiện tại trước khi tạo phòng mới.",
+            ephemeral=True
+        )
+        return
+    
+    # Parse bet
+    try:
+        bet_amount = int(bet)
+    except ValueError:
+        await interaction.response.send_message("❌ Số tiền cược không hợp lệ!", ephemeral=True)
+        return
+    
+    if bet_amount < 10000:
+        await interaction.response.send_message("❌ Tiền cược tối thiểu là 10,000 VNĐ!", ephemeral=True)
+        return
+    
+    # Check balance
+    user_data = await create_user_if_not_exists(user_id)
+    if user_data["balance"] < bet_amount:
+        await interaction.response.send_message(f"❌ Số dư không đủ! Cần {bet_amount:,} VNĐ", ephemeral=True)
+        return
+    
+    # Deduct bet
+    success = await deduct_bet(user_id, bet_amount)
+    if not success:
+        await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
+        return
+    
+    # Create thread
+    game_names = {"taixiu": "🎲 Tài Xỉu", "blackjack": "🃏 Blackjack", "tienlen": "🀄 Tiến Lên"}
+    thread_name = f"{game_names[game]} - {interaction.user.name}"
+    
+    thread = await interaction.channel.create_thread(
+        name=thread_name,
+        type=discord.ChannelType.public_thread,
+        auto_archive_duration=60
+    )
+    
+    # Create room
+    room_id = f"{interaction.guild.id}_{thread.id}"
+    room_manager.create_room(user_id, room_id, game, thread, bet_amount)
+    
+    # Create room view
+    view = RoomView(room_id, user_id, bet_amount, game)
+    room_manager.store_view(room_id, view)
+    
+    # Send room info
+    embed = create_embed(
+        title=f"🏠 Phòng {game_names[game]}",
+        description=f"**Chủ phòng:** {interaction.user.mention}\n"
+                   f"**Game:** {game_names[game]}\n"
+                   f"**Tiền cược:** {bet_amount:,} VNĐ/người\n\n"
+                   f"👤 **Người chơi (1/4):**\n"
+                   f"1. {interaction.user.mention}\n\n"
+                   f"⏰ Phòng sẽ tự đóng sau 5 phút nếu không đủ người!",
+        color=COLOR_GOLD
+    )
+    
+    await thread.send(embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Đã tạo phòng tại {thread.mention}!", ephemeral=True)
+    
+    # Auto-close timer
+    asyncio.create_task(auto_close_room(room_id, thread, 300))
+
+class RoomView(discord.ui.View):
+    def __init__(self, room_id: str, owner_id: str, bet_amount: int, game_type: str):
+        super().__init__(timeout=None)
+        self.room_id = room_id
+        self.owner_id = owner_id
+        self.bet_amount = bet_amount
+        self.game_type = game_type
+    
+    @discord.ui.button(label="Tham Gia", style=discord.ButtonStyle.success, emoji="✅")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        # Check if already in a room
+        existing = room_manager.get_player_room(user_id)
+        if existing:
+            await interaction.response.send_message("❌ Bạn đang ở phòng khác!", ephemeral=True)
+            return
+        
+        # Check balance
+        user_data = await create_user_if_not_exists(user_id)
+        if user_data["balance"] < self.bet_amount:
+            await interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.bet_amount:,} VNĐ", ephemeral=True)
+            return
+        
+        # Deduct bet
+        success = await deduct_bet(user_id, self.bet_amount)
+        if not success:
+            await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
+            return
+        
+        # Join room
+        room_manager.join_room(user_id, self.room_id)
+        
+        # Update room display
+        room = room_manager.get_room(self.room_id)
+        if room:
+            players_text = "\n".join([f"{i+1}. <@{pid}>" for i, pid in enumerate(room["players"])])
+            embed = interaction.message.embeds[0]
+            embed.description = embed.description.split("👤")[0] + f"👤 **Người chơi ({len(room['players'])}/4):**\n{players_text}\n\n⏰ Phòng sẽ tự đóng sau 5 phút nếu không đủ người!"
+            await interaction.message.edit(embed=embed)
+        
+        await interaction.response.send_message("✅ Đã tham gia phòng!", ephemeral=True)
+        
+        # Start game if enough players
+        if room and len(room["players"]) >= 2:
+            room_manager.set_room_status(self.room_id, RoomStatus.PLAYING)
+            await self.start_game(interaction)
+    
+    @discord.ui.button(label="Rời Phòng", style=discord.ButtonStyle.danger, emoji="🚪")
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        if user_id == self.owner_id:
+            # Owner leaving - disband room
+            await interaction.response.send_message("❌ Chủ phòng đã rời. Phòng bị giải tán.", ephemeral=False)
+            thread = interaction.channel
+            await asyncio.sleep(3)
+            await cleanup_and_delete_room(self.room_id, thread)
+            return
+        
+        # Leave room
+        room_manager.leave_room(user_id, self.room_id)
+        
+        # Refund
+        await add_win(user_id, self.bet_amount)
+        
+        # Update display
+        room = room_manager.get_room(self.room_id)
+        if room:
+            players_text = "\n".join([f"{i+1}. <@{pid}>" for i, pid in enumerate(room["players"])])
+            embed = interaction.message.embeds[0]
+            embed.description = embed.description.split("👤")[0] + f"👤 **Người chơi ({len(room['players'])}/4):**\n{players_text}"
+            await interaction.message.edit(embed=embed)
+        
+        await interaction.response.send_message(f"✅ Đã rời phòng! Hoàn trả {self.bet_amount:,} VNĐ", ephemeral=True)
+        
+        # Check if room is empty
+        if room and len(room["players"]) == 0:
+            await cleanup_and_delete_room(self.room_id, interaction.channel)
+    
+    @discord.ui.button(label="Bắt Đầu", style=discord.ButtonStyle.primary, emoji="▶️", row=1)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        if user_id != self.owner_id:
+            await interaction.response.send_message("❌ Chỉ chủ phòng mới có quyền bắt đầu!", ephemeral=True)
+            return
+        
+        room = room_manager.get_room(self.room_id)
+        if not room or len(room["players"]) < 2:
+            await interaction.response.send_message("❌ Cần ít nhất 2 người chơi!", ephemeral=True)
+            return
+        
+        room_manager.set_room_status(self.room_id, RoomStatus.PLAYING)
+        await self.start_game(interaction)
+    
+    async def start_game(self, interaction: discord.Interaction):
+        """Start the game based on type"""
+        room = room_manager.get_room(self.room_id)
+        if not room:
+            return
+        
+        if self.game_type == "taixiu":
+            await start_taixiu_pvp(self.room_id, interaction.channel)
+        elif self.game_type == "blackjack":
+            await start_blackjack_game(self.room_id, interaction.channel)
+        elif self.game_type == "tienlen":
+            await start_tienlen_game(self.room_id, interaction.channel)
+
+
+
+
+
+
+async def auto_close_room(room_id: str, thread: discord.Thread, timeout: int):
+    """Auto close room after timeout if not started"""
+    await asyncio.sleep(timeout)
+    
+    room = room_manager.get_room(room_id)
+    if room and room["status"] == RoomStatus.WAITING:
+        # Refund all players
+        for player_id in room["players"]:
+            await add_win(player_id, room["betAmount"])
+        
+        # Send timeout message
+        try:
+            await thread.send("⏰ Phòng đã hết hạn do không đủ người chơi.\n💰 Tiền cược đã được hoàn trả.")
+        except:
+            pass
+        
+        # Cleanup
+        await asyncio.sleep(3)
+        await cleanup_and_delete_room(room_id, thread)
+
+async def cleanup_and_delete_room(room_id: str, thread: discord.Thread):
+    """Full cleanup and delete thread"""
+    room = room_manager.get_room(room_id)
+    
+    # Refund any remaining players if game not finished
+    if room and room["status"] != RoomStatus.FINISHED:
+        for player_id in room["players"]:
+            if room["status"] == RoomStatus.WAITING:
+                await add_win(player_id, room["betAmount"])
+    
+    # Cleanup room
+    await room_manager.cleanup_room(room_id)
+    
+    # Delete thread
+    try:
+        await thread.delete()
+        print(f"🗑️ Deleted thread: {thread.id}")
+    except Exception as e:
+        print(f"Error deleting thread: {e}")
+
+async def end_game_and_cleanup(room_id: str, thread: discord.Thread, results: Dict):
+    """End game, announce results, cleanup after 15 seconds"""
+    room = room_manager.get_room(room_id)
+    if not room:
+        return
+    
+    room_manager.set_room_status(room_id, RoomStatus.FINISHED)
+    
+    # Build result message
+    description = "🏆 **KẾT QUẢ TRẬN ĐẤU**\n\n"
+    
+    for i, (player_id, data) in enumerate(results.get("rankings", {}).items()):
+        medal = ["🥇", "🥈", "🥉", "💀"][i] if i < 4 else f"{i+1}."
+        description += f"{medal} <@{player_id}> - {data.get('reward', 0):,} VNĐ\n"
+    
+    description += f"\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
+    
+    embed = create_embed(
+        title="🏆 Trận Đấu Kết Thúc",
+        description=description,
+        color=COLOR_GOLD
+    )
+    
+    await thread.send(embed=embed)
+    
+    # Save game history
+    game_history_data = {
+        "roomId": room_id,
+        "gameType": room["gameType"],
+        "players": room["players"],
+        "results": results,
+        "createdAt": datetime.now(timezone.utc)
+    }
+    db.collection("room_history").add(game_history_data)
+    
+    # Wait 15 seconds then cleanup
+    await asyncio.sleep(15)
+    await cleanup_and_delete_room(room_id, thread)
 # ============================================
 # GAME: COINFLIP
 # ============================================
