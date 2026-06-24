@@ -27,6 +27,7 @@ import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
 import warnings
 warnings.filterwarnings('ignore')
+
 # ============================================
 # ROOM MANAGEMENT SYSTEM
 # ============================================
@@ -48,12 +49,11 @@ class RoomManager:
     
     def __init__(self):
         self.active_rooms: Dict[str, Dict] = {}
-        self.player_rooms: Dict[str, str] = {}  # user_id -> room_id
-        self.room_states: Dict[str, Dict] = {}  # room_id -> game state
-        self.room_views: Dict[str, discord.ui.View] = {}  # room_id -> view
+        self.player_rooms: Dict[str, str] = {}
+        self.room_states: Dict[str, Dict] = {}
+        self.room_views: Dict[str, discord.ui.View] = {}
     
     def create_room(self, owner_id: str, room_id: str, game_type: str, thread: discord.Thread, bet_amount: int) -> bool:
-        """Create a new room. Returns False if player already has a room"""
         if owner_id in self.player_rooms:
             return False
         
@@ -75,13 +75,10 @@ class RoomManager:
         self.player_rooms[owner_id] = room_id
         self.room_states[room_id] = {}
         
-        # Save to Firestore
         db.collection("active_rooms").document(room_id).set(room_data)
-        
         return True
     
     def join_room(self, user_id: str, room_id: str) -> bool:
-        """Join a room. Returns False if player already in another room"""
         if room_id not in self.active_rooms:
             return False
         if user_id in self.player_rooms:
@@ -93,60 +90,46 @@ class RoomManager:
         
         room["players"].append(user_id)
         self.player_rooms[user_id] = room_id
-        
-        # Update Firestore
         db.collection("active_rooms").document(room_id).update({"players": room["players"]})
-        
         return True
     
     def leave_room(self, user_id: str, room_id: str) -> bool:
-        """Leave a room"""
         if room_id not in self.active_rooms:
             return False
         
         room = self.active_rooms[room_id]
         if user_id in room["players"]:
             room["players"].remove(user_id)
-        
         if user_id in self.player_rooms:
             del self.player_rooms[user_id]
         
-        # Update Firestore
         db.collection("active_rooms").document(room_id).update({"players": room["players"]})
-        
         return True
     
     def get_player_room(self, user_id: str) -> Optional[str]:
-        """Get the room ID that a player is in"""
         return self.player_rooms.get(user_id)
     
     def get_room(self, room_id: str) -> Optional[Dict]:
-        """Get room data"""
         return self.active_rooms.get(room_id)
     
     def set_room_status(self, room_id: str, status: RoomStatus):
-        """Set room status"""
         if room_id in self.active_rooms:
             self.active_rooms[room_id]["status"] = status
             db.collection("active_rooms").document(room_id).update({"status": status})
     
     def store_view(self, room_id: str, view: discord.ui.View):
-        """Store view for cleanup"""
         self.room_views[room_id] = view
     
     async def cleanup_room(self, room_id: str):
-        """Full cleanup of a room"""
         if room_id not in self.active_rooms:
             return
         
         room = self.active_rooms[room_id]
         
-        # Remove player mappings
         for player_id in room["players"]:
             if player_id in self.player_rooms:
                 del self.player_rooms[player_id]
         
-        # Stop view
         if room_id in self.room_views:
             try:
                 view = self.room_views[room_id]
@@ -157,22 +140,19 @@ class RoomManager:
                 pass
             del self.room_views[room_id]
         
-        # Clear state
         if room_id in self.room_states:
             del self.room_states[room_id]
         
-        # Delete from Firestore
         try:
             db.collection("active_rooms").document(room_id).delete()
         except:
             pass
         
-        # Remove from memory
         del self.active_rooms[room_id]
-        
         print(f"🧹 Cleaned up room: {room_id}")
 
 room_manager = RoomManager()
+
 # ============================================
 # LOAD ENVIRONMENT VARIABLES
 # ============================================
@@ -206,6 +186,12 @@ DAILY_REWARD = 100000
 LOAN_DUE_DAYS = 7
 COOLDOWN_NORMAL = 10
 COOLDOWN_DAILY = 86400
+
+# ============================================
+# ANTI-STREAK SYSTEM
+# ============================================
+ANTI_STREAK_ENABLED = True
+MAX_HISTORY_FOR_ANALYSIS = 100
 
 # ============================================
 # EMOJI CONSTANTS
@@ -412,7 +398,6 @@ async def add_transaction(transaction_type: str, user_id: str, amount: int, targ
     get_transactions_ref().add(transaction_data)
 
 async def update_user_stats(user_id: str, is_win: bool, bet_amount: int, win_amount: int):
-    """Update user stats directly"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
@@ -492,25 +477,19 @@ def create_embed(title: str, description: str = "", color: int = COLOR_PRIMARY, 
     return embed
 
 async def transfer_money(from_id: str, to_id: str, amount: int, transaction_type: str = "transfer") -> bool:
-    """Transfer money directly"""
     from_ref = get_user_ref(from_id)
     to_ref = get_user_ref(to_id)
     
     from_doc = from_ref.get()
     to_doc = to_ref.get()
     
-    if not from_doc.exists:
-        print(f"❌ Sender {from_id} not found")
-        return False
-    if not to_doc.exists:
-        print(f"❌ Receiver {to_id} not found")
+    if not from_doc.exists or not to_doc.exists:
         return False
     
     from_data = from_doc.to_dict()
     to_data = to_doc.to_dict()
     
     if from_data.get("balance", 0) < amount:
-        print(f"❌ Insufficient balance: {from_data.get('balance', 0)} < {amount}")
         return False
     
     from_data["balance"] = from_data["balance"] - amount
@@ -526,12 +505,10 @@ async def transfer_money(from_id: str, to_id: str, amount: int, transaction_type
     return True
 
 async def add_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
-    """Add money directly"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
     if not user_doc.exists:
-        print(f"❌ User {user_id} not found")
         return False
     
     user_data = user_doc.to_dict()
@@ -541,21 +518,18 @@ async def add_money(user_id: str, amount: int, admin_id: str = "system") -> bool
     await add_log("addmoney", user_id, amount, admin_id)
     await add_transaction("addmoney", user_id, amount, admin_id)
     
-    print(f"💰 Added {amount:,} to {user_id}, balance: {user_data['balance']:,}")
+    print(f"💰 Added {amount:,} to {user_id}")
     return True
 
 async def remove_money(user_id: str, amount: int, admin_id: str = "system") -> bool:
-    """Remove money directly"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
     if not user_doc.exists:
-        print(f"❌ User {user_id} not found")
         return False
     
     user_data = user_doc.to_dict()
     if user_data.get("balance", 0) < amount:
-        print(f"❌ Insufficient balance: {user_data.get('balance', 0)} < {amount}")
         return False
     
     user_data["balance"] = user_data["balance"] - amount
@@ -564,45 +538,39 @@ async def remove_money(user_id: str, amount: int, admin_id: str = "system") -> b
     await add_log("trutien", user_id, amount, admin_id)
     await add_transaction("trutien", user_id, amount, admin_id)
     
-    print(f"💸 Removed {amount:,} from {user_id}, balance: {user_data['balance']:,}")
+    print(f"💸 Removed {amount:,} from {user_id}")
     return True
 
 async def deduct_bet(user_id: str, amount: int) -> bool:
-    """Deduct bet amount directly"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
     if not user_doc.exists:
-        print(f"❌ User {user_id} not found")
         return False
     
     user_data = user_doc.to_dict()
     if user_data.get("balance", 0) < amount:
-        print(f"❌ Insufficient balance: {user_data.get('balance', 0)} < {amount}")
         return False
     
     user_data["balance"] = user_data["balance"] - amount
     user_ref.set(user_data)
-    print(f"🎲 Deducted bet {amount:,} from {user_id}, balance: {user_data['balance']:,}")
+    print(f"🎲 Deducted bet {amount:,} from {user_id}")
     return True
 
 async def add_win(user_id: str, amount: int) -> bool:
-    """Add win amount directly"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
     if not user_doc.exists:
-        print(f"❌ User {user_id} not found")
         return False
     
     user_data = user_doc.to_dict()
     user_data["balance"] = user_data.get("balance", 0) + amount
     user_ref.set(user_data)
-    print(f"🎉 Added win {amount:,} to {user_id}, balance: {user_data['balance']:,}")
+    print(f"🎉 Added win {amount:,} to {user_id}")
     return True
 
 async def check_and_deduct_shield(user_id: str) -> bool:
-    """Check and deduct free bet shield"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
@@ -618,7 +586,6 @@ async def check_and_deduct_shield(user_id: str) -> bool:
     return False
 
 async def check_and_deduct_coupon(user_id: str) -> bool:
-    """Check and deduct discount coupon"""
     user_ref = get_user_ref(user_id)
     user_doc = user_ref.get()
     
@@ -637,8 +604,6 @@ async def check_and_deduct_coupon(user_id: str) -> bool:
 # CAU CHART GENERATOR
 # ============================================
 def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
-    """Generate professional Tai Xiu statistics chart"""
-    
     if not game_list:
         fig, ax = plt.subplots(figsize=(16, 9), dpi=100, facecolor='#1a0a2e')
         ax.set_facecolor('#1a0a2e')
@@ -651,7 +616,6 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
         plt.close(fig)
         return buf
     
-    # Reverse to show oldest first
     game_list = list(reversed(game_list))
     
     results = [g.get('result', 0) for g in game_list]
@@ -663,7 +627,6 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
     sessions = list(range(1, len(results) + 1))
     total_phiens = len(results)
     
-    # Colors
     bg_dark = '#0d0520'
     tai_color = '#FF4444'
     xiu_color = '#4488FF'
@@ -672,24 +635,11 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
     yellow = '#FFFF00'
     white = '#FFFFFF'
     
-    # Create figure
     fig = plt.figure(figsize=(16, 9), dpi=100, facecolor=bg_dark)
+    gs = fig.add_gridspec(4, 4, hspace=0.4, wspace=0.3, top=0.93, bottom=0.05, left=0.05, right=0.98)
     
-    # Add gradient background
-    gradient = np.linspace(0, 1, 256).reshape(256, 1)
-    gradient = np.hstack([gradient, gradient, gradient])
+    fig.suptitle('🎲 THỐNG KÊ TÀI XỈU', fontsize=20, fontweight='bold', color=gold, y=0.98, fontfamily='monospace')
     
-    # Create custom layout
-    gs = fig.add_gridspec(4, 4, hspace=0.4, wspace=0.3, 
-                          top=0.93, bottom=0.05, left=0.05, right=0.98)
-    
-    # Title
-    fig.suptitle('🎲 THỐNG KÊ TÀI XỈU', fontsize=20, fontweight='bold', 
-                 color=gold, y=0.98, fontfamily='monospace')
-    
-    # ==========================================
-    # PANEL 1: Current Session Info (Top Right)
-    # ==========================================
     ax_info = fig.add_subplot(gs[0, 3])
     ax_info.set_facecolor('#150830')
     ax_info.axis('off')
@@ -698,96 +648,47 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
         last_result = results[-1]
         last_tai_xiu = tai_xiu_list[-1]
         last_dice = f"{dice1_list[-1]}-{dice2_list[-1]}-{dice3_list[-1]}"
-        
         color = tai_color if last_tai_xiu == 'tai' else xiu_color if last_tai_xiu == 'xiu' else gold
         label = 'TÀI' if last_tai_xiu == 'tai' else 'XỈU' if last_tai_xiu == 'xiu' else 'BỘ BA'
-        
-        ax_info.text(0.5, 0.85, f'Phiên #{total_phiens}', ha='center', fontsize=13, 
-                    color=white, fontweight='bold', fontfamily='monospace')
-        ax_info.text(0.5, 0.5, label, ha='center', fontsize=28, color=color, 
-                    fontweight='bold', fontfamily='monospace')
-        ax_info.text(0.5, 0.2, f'({last_dice})', ha='center', fontsize=11, color='#aaaaaa', 
-                    fontfamily='monospace')
+        ax_info.text(0.5, 0.85, f'Phiên #{total_phiens}', ha='center', fontsize=13, color=white, fontweight='bold', fontfamily='monospace')
+        ax_info.text(0.5, 0.5, label, ha='center', fontsize=28, color=color, fontweight='bold', fontfamily='monospace')
+        ax_info.text(0.5, 0.2, f'({last_dice})', ha='center', fontsize=11, color='#aaaaaa', fontfamily='monospace')
     
-    # Add border
-    for spine in ax_info.spines.values():
-        spine.set_edgecolor('#3a2a5e')
-        spine.set_linewidth(2)
-    
-    # ==========================================
-    # PANEL 2: Total Score Line Chart
-    # ==========================================
     ax1 = fig.add_subplot(gs[0:2, 0:3])
     ax1.set_facecolor('#150830')
-    
-    ax1.plot(sessions, results, color=white, linewidth=2.5, marker='o', 
-             markersize=9, markerfacecolor=gold, markeredgecolor=white,
-             markeredgewidth=1.5, zorder=5)
-    
+    ax1.plot(sessions, results, color=white, linewidth=2.5, marker='o', markersize=9, markerfacecolor=gold, markeredgecolor=white, markeredgewidth=1.5, zorder=5)
     ax1.fill_between(sessions, results, 3, alpha=0.15, color=gold)
-    
-    # Add value labels
     for i, val in enumerate(results):
-        ax1.annotate(str(val), (sessions[i], val), textcoords="offset points", 
-                    xytext=(0, 12), ha='center', fontsize=8, color=white, 
-                    fontweight='bold', fontfamily='monospace')
-    
+        ax1.annotate(str(val), (sessions[i], val), textcoords="offset points", xytext=(0, 12), ha='center', fontsize=8, color=white, fontweight='bold', fontfamily='monospace')
     ax1.set_ylim(2, 19)
     ax1.set_yticks(range(3, 19))
     ax1.set_ylabel('Tổng Điểm', color=white, fontsize=10, fontfamily='monospace')
     ax1.set_xlabel('Phiên', color=white, fontsize=10, fontfamily='monospace')
     ax1.tick_params(colors=white, labelsize=8)
     ax1.grid(True, alpha=0.2, linestyle='--', color='white')
-    ax1.set_title('📊 BIỂU ĐỒ TỔNG ĐIỂM', color=gold, fontsize=11, fontweight='bold', 
-                  fontfamily='monospace', pad=8)
+    ax1.set_title('📊 BIỂU ĐỒ TỔNG ĐIỂM', color=gold, fontsize=11, fontweight='bold', fontfamily='monospace', pad=8)
     
-    for spine in ax1.spines.values():
-        spine.set_edgecolor('#3a2a5e')
-        spine.set_linewidth(1)
-    
-    # ==========================================
-    # PANEL 3: Dice Charts
-    # ==========================================
     ax2 = fig.add_subplot(gs[2, 0:2])
     ax2.set_facecolor('#150830')
-    
-    ax2.plot(sessions, dice1_list, color='#FF6B6B', linewidth=1.8, marker='s', 
-             markersize=6, markerfacecolor='#FF6B6B', label='Xúc xắc 1')
-    ax2.plot(sessions, dice2_list, color=cyan, linewidth=1.8, marker='^', 
-             markersize=6, markerfacecolor=cyan, label='Xúc xắc 2')
-    ax2.plot(sessions, dice3_list, color=yellow, linewidth=1.8, marker='D', 
-             markersize=6, markerfacecolor=yellow, label='Xúc xắc 3')
-    
+    ax2.plot(sessions, dice1_list, color='#FF6B6B', linewidth=1.8, marker='s', markersize=6, markerfacecolor='#FF6B6B', label='Xúc xắc 1')
+    ax2.plot(sessions, dice2_list, color=cyan, linewidth=1.8, marker='^', markersize=6, markerfacecolor=cyan, label='Xúc xắc 2')
+    ax2.plot(sessions, dice3_list, color=yellow, linewidth=1.8, marker='D', markersize=6, markerfacecolor=yellow, label='Xúc xắc 3')
     ax2.set_ylim(0.5, 6.5)
     ax2.set_yticks(range(1, 7))
     ax2.set_ylabel('Giá trị', color=white, fontsize=9, fontfamily='monospace')
     ax2.tick_params(colors=white, labelsize=8)
     ax2.grid(True, alpha=0.2, linestyle='--', color='white')
-    ax2.legend(loc='upper left', fontsize=8, facecolor='#150830', 
-               edgecolor='#3a2a5e', labelcolor=white)
-    ax2.set_title('🎲 THỐNG KÊ XÚC XẮC', color=gold, fontsize=11, fontweight='bold', 
-                  fontfamily='monospace', pad=8)
+    ax2.legend(loc='upper left', fontsize=8, facecolor='#150830', edgecolor='#3a2a5e', labelcolor=white)
+    ax2.set_title('🎲 THỐNG KÊ XÚC XẮC', color=gold, fontsize=11, fontweight='bold', fontfamily='monospace', pad=8)
     
-    for spine in ax2.spines.values():
-        spine.set_edgecolor('#3a2a5e')
-        spine.set_linewidth(1)
-    
-    # ==========================================
-    # PANEL 4: Cau Display
-    # ==========================================
     ax3 = fig.add_subplot(gs[2, 2:])
     ax3.set_facecolor('#150830')
     ax3.axis('off')
+    ax3.text(0.5, 0.85, '📈 THỐNG KÊ CẦU', ha='center', fontsize=11, color=gold, fontweight='bold', fontfamily='monospace')
     
-    # Display Tai/Xiu sequence
-    ax3.text(0.5, 0.85, '📈 THỐNG KÊ CẦU', ha='center', fontsize=11, color=gold, 
-             fontweight='bold', fontfamily='monospace')
-    
-    # Draw circles for each result
     n = len(tai_xiu_list)
     max_per_row = 10
     rows = (n + max_per_row - 1) // max_per_row
-    
     y_start = 0.6
     y_spacing = 0.15
     
@@ -795,42 +696,26 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
         start_idx = row * max_per_row
         end_idx = min((row + 1) * max_per_row, n)
         row_count = end_idx - start_idx
-        
         x_spacing = 0.9 / row_count
         y_pos = y_start - row * y_spacing
-        
         for i, idx in enumerate(range(start_idx, end_idx)):
             x_pos = 0.1 + i * x_spacing + x_spacing / 2
-            
             result_type = tai_xiu_list[idx]
-            if result_type == 'tai':
-                color = tai_color
-            elif result_type == 'xiu':
-                color = xiu_color
-            else:
-                color = gold
-            
+            color = tai_color if result_type == 'tai' else xiu_color if result_type == 'xiu' else gold
             circle = plt.Circle((x_pos, y_pos), 0.025, color=color, transform=ax3.transAxes)
             ax3.add_patch(circle)
     
-    # Legend
     tai_patch = mpatches.Patch(color=tai_color, label='TÀI')
     xiu_patch = mpatches.Patch(color=xiu_color, label='XỈU')
-    ax3.legend(handles=[tai_patch, xiu_patch], loc='lower center', fontsize=8, 
-               facecolor='#150830', edgecolor='#3a2a5e', labelcolor=white, ncol=2)
+    ax3.legend(handles=[tai_patch, xiu_patch], loc='lower center', fontsize=8, facecolor='#150830', edgecolor='#3a2a5e', labelcolor=white, ncol=2)
     
-    # ==========================================
-    # PANEL 5: Analysis & Prediction
-    # ==========================================
     ax4 = fig.add_subplot(gs[3, :])
     ax4.set_facecolor('#150830')
     ax4.axis('off')
     
-    # Calculate stats
     tai_count = sum(1 for t in tai_xiu_list if t == 'tai')
     xiu_count = sum(1 for t in tai_xiu_list if t == 'xiu')
     
-    # Current streak
     current_streak = 0
     streak_type = None
     for t in reversed(tai_xiu_list):
@@ -844,7 +729,6 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
         else:
             break
     
-    # Predict
     if tai_count > xiu_count:
         prediction = '🔴 TÀI'
         confidence = 50 + min(15, tai_count - xiu_count)
@@ -857,33 +741,285 @@ def generate_cau_chart(game_list: List[Dict]) -> BytesIO:
     
     confidence = min(65, confidence)
     
-    # Display
-    ax4.text(0.03, 0.85, '📊 PHÂN TÍCH & DỰ ĐOÁN', color=gold, fontsize=13, 
-             fontweight='bold', fontfamily='monospace')
-    
-    ax4.text(0.03, 0.6, f'Tài: {tai_count}/{total_phiens} ({tai_count/total_phiens*100:.0f}%)', 
-             color=white, fontsize=10, fontfamily='monospace')
-    ax4.text(0.03, 0.4, f'Xỉu: {xiu_count}/{total_phiens} ({xiu_count/total_phiens*100:.0f}%)', 
-             color=white, fontsize=10, fontfamily='monospace')
-    
+    ax4.text(0.03, 0.85, '📊 PHÂN TÍCH & DỰ ĐOÁN', color=gold, fontsize=13, fontweight='bold', fontfamily='monospace')
+    ax4.text(0.03, 0.6, f'Tài: {tai_count}/{total_phiens} ({tai_count/total_phiens*100:.0f}%)', color=white, fontsize=10, fontfamily='monospace')
+    ax4.text(0.03, 0.4, f'Xỉu: {xiu_count}/{total_phiens} ({xiu_count/total_phiens*100:.0f}%)', color=white, fontsize=10, fontfamily='monospace')
     streak_text = f'{current_streak} phiên {streak_type} liên tiếp' if streak_type else 'N/A'
-    ax4.text(0.03, 0.2, f'🔥 Chuỗi: {streak_text}', color=white, fontsize=10, 
-             fontfamily='monospace')
+    ax4.text(0.03, 0.2, f'🔥 Chuỗi: {streak_text}', color=white, fontsize=10, fontfamily='monospace')
+    ax4.text(0.55, 0.6, f'🤖 Dự đoán: {prediction}', color=gold, fontsize=14, fontweight='bold', fontfamily='monospace')
+    ax4.text(0.55, 0.35, f'Độ tin cậy: {confidence}%', color='#aaaaaa', fontsize=11, fontfamily='monospace')
+    ax4.text(0.55, 0.15, f'Tỷ lệ đúng: 50-65%', color='#777777', fontsize=8, fontfamily='monospace')
     
-    ax4.text(0.55, 0.6, f'🤖 Dự đoán: {prediction}', color=gold, fontsize=14, 
-             fontweight='bold', fontfamily='monospace')
-    ax4.text(0.55, 0.35, f'Độ tin cậy: {confidence}%', color='#aaaaaa', fontsize=11, 
-             fontfamily='monospace')
-    ax4.text(0.55, 0.15, f'Tỷ lệ đúng: 50-65%', color='#777777', fontsize=8, 
-             fontfamily='monospace')
-    
-    # Save to buffer
     buf = BytesIO()
     fig.savefig(buf, format='png', facecolor=bg_dark, bbox_inches='tight', dpi=100)
     buf.seek(0)
     plt.close(fig)
-    
     return buf
+
+# ============================================
+# ANTI-STREAK FUNCTIONS
+# ============================================
+def get_recent_games(limit: int = 100) -> List[Dict]:
+    games = get_game_history_ref().order_by("createdAt", direction=firestore.Query.DESCENDING).limit(limit).get()
+    return [doc.to_dict() for doc in games]
+
+def analyze_streak(game_list: List[Dict]) -> Tuple[int, Optional[str]]:
+    if not game_list:
+        return 0, None
+    
+    streak_type = None
+    count = 0
+    
+    for g in game_list:
+        tai_xiu = g.get('taiOrXiu', '')
+        if tai_xiu == 'triple':
+            continue
+        if streak_type is None:
+            streak_type = tai_xiu
+            count = 1
+        elif tai_xiu == streak_type:
+            count += 1
+        else:
+            break
+    
+    return count, streak_type
+
+def calculate_weighted_roll(game_list: List[Dict]) -> Tuple[int, int, int]:
+    if not ANTI_STREAK_ENABLED:
+        return random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+    
+    recent = game_list[:MAX_HISTORY_FOR_ANALYSIS]
+    tai_count = sum(1 for g in recent if g.get('taiOrXiu') == 'tai')
+    xiu_count = sum(1 for g in recent if g.get('taiOrXiu') == 'xiu')
+    total = tai_count + xiu_count
+    
+    last_20 = game_list[:20]
+    streak_count, streak_type = analyze_streak(last_20)
+    
+    tai_prob = 0.5
+    xiu_prob = 0.5
+    
+    if streak_type == 'tai':
+        if streak_count >= 7:
+            tai_prob = 0.05
+            xiu_prob = 0.95
+        elif streak_count >= 6:
+            tai_prob = 0.15
+            xiu_prob = 0.85
+        elif streak_count >= 5:
+            tai_prob = 0.25
+            xiu_prob = 0.75
+        elif streak_count >= 4:
+            tai_prob = 0.35
+            xiu_prob = 0.65
+    elif streak_type == 'xiu':
+        if streak_count >= 7:
+            tai_prob = 0.95
+            xiu_prob = 0.05
+        elif streak_count >= 6:
+            tai_prob = 0.85
+            xiu_prob = 0.15
+        elif streak_count >= 5:
+            tai_prob = 0.75
+            xiu_prob = 0.25
+        elif streak_count >= 4:
+            tai_prob = 0.65
+            xiu_prob = 0.35
+    
+    if total > 20:
+        tai_percent = tai_count / total
+        if tai_percent > 0.70:
+            tai_prob -= 0.20
+            xiu_prob += 0.20
+        elif tai_percent > 0.60:
+            tai_prob -= 0.10
+            xiu_prob += 0.10
+        elif tai_percent < 0.30:
+            tai_prob += 0.20
+            xiu_prob -= 0.20
+        elif tai_percent < 0.40:
+            tai_prob += 0.10
+            xiu_prob -= 0.10
+    
+    total_prob = tai_prob + xiu_prob
+    tai_prob = max(0.05, min(0.95, tai_prob / total_prob))
+    xiu_prob = 1.0 - tai_prob
+    
+    if random.random() < tai_prob:
+        total_score = random.randint(11, 17)
+    else:
+        total_score = random.randint(4, 10)
+    
+    return generate_dice_for_total(total_score)
+
+def generate_dice_for_total(target: int) -> Tuple[int, int, int]:
+    attempts = 0
+    while attempts < 1000:
+        d1 = random.randint(1, 6)
+        d2 = random.randint(1, 6)
+        d3 = random.randint(1, 6)
+        if d1 + d2 + d3 == target:
+            return d1, d2, d3
+        attempts += 1
+    
+    d1 = min(6, max(1, target // 3))
+    remaining = target - d1
+    d2 = min(6, max(1, remaining // 2))
+    d3 = target - d1 - d2
+    
+    if d3 < 1:
+        d2 -= (1 - d3)
+        d3 = 1
+    elif d3 > 6:
+        d2 += (d3 - 6)
+        d3 = 6
+    
+    return d1, d2, d3
+
+def detect_cau_pattern(game_list: List[Dict]) -> str:
+    if len(game_list) < 4:
+        return "Chưa đủ dữ liệu"
+    
+    recent = game_list[:10]
+    tai_xiu = [g.get('taiOrXiu', '') for g in recent if g.get('taiOrXiu') != 'triple']
+    
+    if len(tai_xiu) < 4:
+        return "Đang phân tích..."
+    
+    if len(tai_xiu) >= 4:
+        is_1_1 = all(tai_xiu[i] != tai_xiu[i+1] for i in range(min(4, len(tai_xiu)-1)))
+        if is_1_1:
+            return "Cầu 1-1 (Đơn xen kẽ)"
+    
+    if len(tai_xiu) >= 6:
+        pairs = [tai_xiu[i:i+2] for i in range(0, 6, 2)]
+        if len(pairs) >= 2 and all(len(set(p)) == 1 for p in pairs) and pairs[0] != pairs[1]:
+            return "Cầu 2-2"
+    
+    if len(tai_xiu) >= 9:
+        triples = [tai_xiu[i:i+3] for i in range(0, 9, 3)]
+        if len(triples) >= 2 and all(len(set(t)) == 1 for t in triples) and triples[0] != triples[1]:
+            return "Cầu 3-3"
+    
+    streak_count, streak_type = analyze_streak(game_list)
+    if streak_count >= 4:
+        return f"Cầu bệt {streak_type.upper()} ({streak_count} phiên)"
+    if streak_count == 3:
+        return f"Có dấu hiệu bệt {streak_type.upper()}"
+    
+    return "Cầu gãy / Không xác định"
+
+# ============================================
+# ROOM GAME FUNCTIONS
+# ============================================
+async def start_taixiu_pvp(room_id: str, thread: discord.Thread):
+    room = room_manager.get_room(room_id)
+    if not room:
+        return
+    
+    players = room["players"]
+    bet_amount = room["betAmount"]
+    
+    results = {}
+    for player_id in players:
+        dice1, dice2, dice3 = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+        total = dice1 + dice2 + dice3
+        results[player_id] = {"dice": [dice1, dice2, dice3], "total": total}
+    
+    sorted_players = sorted(results.items(), key=lambda x: x[1]["total"], reverse=True)
+    
+    rankings = {}
+    total_pool = int(bet_amount * len(players) * 0.95)
+    
+    for i, (player_id, data) in enumerate(sorted_players):
+        if i == 0:
+            reward = int(total_pool * 0.7)
+        elif i == 1:
+            reward = int(total_pool * 0.25)
+        elif i == 2 and len(players) >= 3:
+            reward = int(total_pool * 0.05)
+        else:
+            reward = 0
+        
+        rankings[player_id] = {"dice": data["dice"], "total": data["total"], "reward": reward}
+        if reward > 0:
+            await add_win(player_id, reward)
+    
+    dice_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
+    description = "🎲 **KẾT QUẢ TÀI XỈU PvP**\n\n"
+    
+    for i, (player_id, data) in enumerate(sorted_players):
+        d = data["dice"]
+        medal = ["🥇", "🥈", "🥉", "💀"][i] if i < 4 else f"{i+1}."
+        description += f"{medal} <@{player_id}>\n   {dice_emojis[d[0]]} {dice_emojis[d[1]]} {dice_emojis[d[2]]} = **{data['total']}**\n   💰 {data['reward']:,} VNĐ\n\n"
+    
+    description += f"🗑️ Phòng sẽ tự đóng sau 15 giây..."
+    
+    embed = create_embed(title="🏆 Kết Quả Tài Xỉu PvP", description=description, color=COLOR_GOLD)
+    await thread.send(embed=embed)
+    await asyncio.sleep(15)
+    await end_game_and_cleanup(room_id, thread, {"rankings": rankings})
+
+async def start_blackjack_game(room_id: str, thread: discord.Thread):
+    await thread.send("🃏 Blackjack đang phát triển... Sẽ ra mắt sớm!")
+    await end_game_and_cleanup(room_id, thread, {"rankings": {}})
+
+async def start_tienlen_game(room_id: str, thread: discord.Thread):
+    await thread.send("🀄 Tiến Lên đang phát triển... Sẽ ra mắt sớm!")
+    await end_game_and_cleanup(room_id, thread, {"rankings": {}})
+
+async def auto_close_room(room_id: str, thread: discord.Thread, timeout: int):
+    await asyncio.sleep(timeout)
+    room = room_manager.get_room(room_id)
+    if room and room["status"] == RoomStatus.WAITING:
+        for player_id in room["players"]:
+            await add_win(player_id, room["betAmount"])
+        try:
+            await thread.send("⏰ Phòng đã hết hạn do không đủ người chơi.\n💰 Tiền cược đã được hoàn trả.")
+        except:
+            pass
+        await asyncio.sleep(3)
+        await cleanup_and_delete_room(room_id, thread)
+
+async def cleanup_and_delete_room(room_id: str, thread: discord.Thread):
+    room = room_manager.get_room(room_id)
+    if room and room["status"] != RoomStatus.FINISHED:
+        for player_id in room["players"]:
+            if room["status"] == RoomStatus.WAITING:
+                await add_win(player_id, room["betAmount"])
+    await room_manager.cleanup_room(room_id)
+    try:
+        await thread.delete()
+        print(f"🗑️ Deleted thread: {thread.id}")
+    except Exception as e:
+        print(f"Error deleting thread: {e}")
+
+async def end_game_and_cleanup(room_id: str, thread: discord.Thread, results: Dict):
+    room = room_manager.get_room(room_id)
+    if not room:
+        return
+    
+    room_manager.set_room_status(room_id, RoomStatus.FINISHED)
+    
+    description = "🏆 **KẾT QUẢ TRẬN ĐẤU**\n\n"
+    for i, (player_id, data) in enumerate(results.get("rankings", {}).items()):
+        medal = ["🥇", "🥈", "🥉", "💀"][i] if i < 4 else f"{i+1}."
+        description += f"{medal} <@{player_id}> - {data.get('reward', 0):,} VNĐ\n"
+    description += f"\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
+    
+    embed = create_embed(title="🏆 Trận Đấu Kết Thúc", description=description, color=COLOR_GOLD)
+    await thread.send(embed=embed)
+    
+    db.collection("room_history").add({
+        "roomId": room_id,
+        "gameType": room["gameType"],
+        "players": room["players"],
+        "results": results,
+        "createdAt": datetime.now(timezone.utc)
+    })
+    
+    await asyncio.sleep(15)
+    await cleanup_and_delete_room(room_id, thread)
 
 # ============================================
 # BOT EVENTS
@@ -1226,7 +1362,6 @@ async def profilecolor(interaction: discord.Interaction):
             option_labels = {o.label: o for o in self.options}
             option = option_labels[selected]
             color_name = f"{option.emoji} {option.label}"
-            
             get_user_ref(str(select_interaction.user.id)).update({"profileColor": color_name})
             embed = create_embed(title="🎨 Đổi Màu Profile", description=f"Đã đổi màu profile thành **{color_name}**", color=PROFILE_COLORS.get(color_name, COLOR_BLUE), thumbnail_url=select_interaction.user.display_avatar.url, footer_text="Màu sẽ hiển thị trong /info")
             await select_interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1269,13 +1404,11 @@ async def shop(interaction: discord.Interaction):
                 return
             
             user_data_btn = user_doc.to_dict()
-            
             if user_data_btn["balance"] < self.price:
                 await button_interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.price:,} VNĐ", ephemeral=True)
                 return
             
             user_data_btn["balance"] -= self.price
-            
             if "Phiếu Giảm Giá" in self.item_name:
                 user_data_btn["discountCouponUses"] = user_data_btn.get("discountCouponUses", 0) + 3
                 msg = f"✅ Mua thành công **{self.item_name}**! Bạn có thêm 3 lượt sử dụng."
@@ -1342,34 +1475,21 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
             if button_interaction.user.id != user.id:
                 await button_interaction.response.send_message("❌ Chỉ người được tag mới có quyền đồng ý!", ephemeral=True)
                 return
-            
             await button_interaction.response.defer()
-            
             now = datetime.now(timezone.utc)
             due_at = now + timedelta(days=LOAN_DUE_DAYS)
-            
             success = await transfer_money(target_id, user_id, amount, "loan")
-            
             if success:
                 loan_ref = db.collection("loans").add({
-                    "borrowerId": user_id,
-                    "lenderId": target_id,
-                    "amount": amount,
-                    "createdAt": now,
-                    "dueAt": due_at,
-                    "repaid": False
+                    "borrowerId": user_id, "lenderId": target_id, "amount": amount,
+                    "createdAt": now, "dueAt": due_at, "repaid": False
                 })
                 loan_id = loan_ref[1].id
-                
                 embed = create_embed(
                     title="✅ Vay Tiền Thành Công",
                     description=f"**{interaction.user.name}** đã vay **{amount:,} VNĐ** từ **{user.name}**",
                     color=COLOR_SUCCESS,
-                    fields=[
-                        ("📋 Mã khoản vay", loan_id, False),
-                        ("📅 Hạn trả", due_at.strftime("%d/%m/%Y"), False),
-                        ("⚠️ Lưu ý", "Quá hạn sẽ bị khóa game!", False)
-                    ],
+                    fields=[("📋 Mã khoản vay", loan_id, False), ("📅 Hạn trả", due_at.strftime("%d/%m/%Y"), False), ("⚠️ Lưu ý", "Quá hạn sẽ bị khóa game!", False)],
                     footer_text=f"Dùng /tra {loan_id} để trả nợ"
                 )
                 await button_interaction.message.edit(embed=embed, view=None)
@@ -1381,7 +1501,6 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
             if button_interaction.user.id != user.id:
                 await button_interaction.response.send_message("❌ Chỉ người được tag mới có quyền từ chối!", ephemeral=True)
                 return
-            
             embed = create_embed(title="❌ Từ Chối Vay", description=f"**{user.name}** đã từ chối cho **{interaction.user.name}** vay tiền.", color=COLOR_ERROR)
             await button_interaction.message.edit(embed=embed, view=None)
     
@@ -1393,7 +1512,6 @@ async def vay(interaction: discord.Interaction, user: discord.User, amount: int)
         thumbnail_url=interaction.user.display_avatar.url,
         footer_text=f"Người cho vay: {user.name}"
     )
-    
     cooldown_manager.set_cooldown(user_id, "vay")
     await interaction.response.send_message(embed=embed, view=LoanView())
 
@@ -1410,11 +1528,9 @@ async def tra(interaction: discord.Interaction, loan_id: str):
         return
     
     loan_data = loan_doc.to_dict()
-    
     if loan_data["repaid"]:
         await interaction.response.send_message("❌ Khoản vay này đã được trả!", ephemeral=True)
         return
-    
     if loan_data["borrowerId"] != user_id:
         await interaction.response.send_message("❌ Đây không phải khoản vay của bạn!", ephemeral=True)
         return
@@ -1425,16 +1541,9 @@ async def tra(interaction: discord.Interaction, loan_id: str):
         return
     
     success = await transfer_money(user_id, loan_data["lenderId"], loan_data["amount"], "repay")
-    
     if success:
         get_loan_ref(loan_id).update({"repaid": True})
-        embed = create_embed(
-            title="✅ Trả Nợ Thành Công",
-            description=f"Đã trả **{loan_data['amount']:,} VNĐ** cho người cho vay!",
-            color=COLOR_SUCCESS,
-            fields=[("📋 Mã khoản vay", loan_id, False)],
-            thumbnail_url=interaction.user.display_avatar.url
-        )
+        embed = create_embed(title="✅ Trả Nợ Thành Công", description=f"Đã trả **{loan_data['amount']:,} VNĐ** cho người cho vay!", color=COLOR_SUCCESS, fields=[("📋 Mã khoản vay", loan_id, False)], thumbnail_url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Trả nợ thất bại!", ephemeral=True)
@@ -1447,7 +1556,6 @@ async def nolist(interaction: discord.Interaction):
     
     loans_as_borrower = db.collection("loans").where(filter=FieldFilter("borrowerId", "==", user_id)).get()
     loans_as_lender = db.collection("loans").where(filter=FieldFilter("lenderId", "==", user_id)).get()
-    
     all_loans = list(loans_as_borrower) + list(loans_as_lender)
     
     if not all_loans:
@@ -1456,40 +1564,28 @@ async def nolist(interaction: discord.Interaction):
     
     description = "**Khoản vay của bạn:**\n\n"
     shown_ids = set()
-    
     for loan_doc in all_loans:
         loan = loan_doc.to_dict()
         loan_id = loan_doc.id
-        
         if loan_id in shown_ids:
             continue
         shown_ids.add(loan_id)
-        
         try:
             borrower = interaction.guild.get_member(int(loan["borrowerId"]))
             borrower_name = borrower.name if borrower else loan["borrowerId"]
         except:
             borrower_name = loan["borrowerId"]
-        
         try:
             lender = interaction.guild.get_member(int(loan["lenderId"]))
             lender_name = lender.name if lender else loan["lenderId"]
         except:
             lender_name = loan["lenderId"]
-        
         status = "✅ Đã trả" if loan["repaid"] else "⚠️ Chưa trả"
         if not loan["repaid"] and isinstance(loan.get("dueAt"), datetime) and loan["dueAt"] < datetime.now(timezone.utc):
             status = "🔴 QUÁ HẠN"
-        
         due_at = loan.get("dueAt")
         due_str = due_at.strftime("%d/%m/%Y") if isinstance(due_at, datetime) else "N/A"
-        
-        description += f"📋 **ID:** `{loan_id}`\n"
-        description += f"👤 Người vay: **{borrower_name}**\n"
-        description += f"💳 Người cho vay: **{lender_name}**\n"
-        description += f"💰 Số tiền: **{loan['amount']:,} VNĐ**\n"
-        description += f"📅 Hạn trả: **{due_str}**\n"
-        description += f"📊 Trạng thái: {status}\n\n"
+        description += f"📋 **ID:** `{loan_id}`\n👤 Người vay: **{borrower_name}**\n💳 Người cho vay: **{lender_name}**\n💰 Số tiền: **{loan['amount']:,} VNĐ**\n📅 Hạn trả: **{due_str}**\n📊 Trạng thái: {status}\n\n"
     
     embed = create_embed(title="📋 Danh Sách Nợ", description=description, color=COLOR_WARNING, footer_text="Dùng /tra <loan_id> để trả nợ")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1527,10 +1623,8 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
             if button_interaction.user.id != user.id:
                 await button_interaction.response.send_message("❌ Chỉ người được tag mới có quyền!", ephemeral=True)
                 return
-            
             await button_interaction.response.defer()
             success = await transfer_money(target_id, user_id, amount, "anxin")
-            
             if success:
                 embed = create_embed(title="✅ Xin Tiền Thành Công", description=f"**{user.name}** đã cho **{interaction.user.name}** **{amount:,} VNĐ**!", color=COLOR_SUCCESS, thumbnail_url=interaction.user.display_avatar.url)
                 await button_interaction.message.edit(embed=embed, view=None)
@@ -1542,7 +1636,6 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
             if button_interaction.user.id != user.id:
                 await button_interaction.response.send_message("❌ Chỉ người được tag mới có quyền!", ephemeral=True)
                 return
-            
             embed = create_embed(title="❌ Từ Chối", description=f"**{user.name}** đã từ chối cho **{interaction.user.name}** tiền.", color=COLOR_ERROR)
             await button_interaction.message.edit(embed=embed, view=None)
     
@@ -1553,217 +1646,14 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
         thumbnail_url=interaction.user.display_avatar.url,
         footer_text=f"Người được xin: {user.name}"
     )
-    
     cooldown_manager.set_cooldown(user_id, "anxin")
     await interaction.response.send_message(embed=embed, view=XinView())
-
-# ============================================
-# ANTI-STREAK SYSTEM
-# ============================================
-ANTI_STREAK_ENABLED = True
-MAX_HISTORY_FOR_ANALYSIS = 100
-
-def get_recent_games(limit: int = 100) -> List[Dict]:
-    """Get recent game history for analysis"""
-    games = get_game_history_ref().order_by(
-        "createdAt", direction=firestore.Query.DESCENDING
-    ).limit(limit).get()
-    return [doc.to_dict() for doc in games]
-
-def analyze_streak(game_list: List[Dict]) -> Tuple[int, Optional[str]]:
-    """Analyze current streak. Returns (streak_count, streak_type)"""
-    if not game_list:
-        return 0, None
-    
-    streak_type = None
-    count = 0
-    
-    for g in game_list:
-        tai_xiu = g.get('taiOrXiu', '')
-        if tai_xiu == 'triple':
-            continue
-        if streak_type is None:
-            streak_type = tai_xiu
-            count = 1
-        elif tai_xiu == streak_type:
-            count += 1
-        else:
-            break
-    
-    return count, streak_type
-
-def calculate_weighted_roll(game_list: List[Dict]) -> Tuple[int, int, int]:
-    """
-    AI-driven weighted roll system
-    Returns (dice1, dice2, dice3) with adjusted probabilities
-    """
-    if not ANTI_STREAK_ENABLED:
-        return random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
-    
-    # Analyze last 100 games
-    recent = game_list[:MAX_HISTORY_FOR_ANALYSIS]
-    
-    tai_count = sum(1 for g in recent if g.get('taiOrXiu') == 'tai')
-    xiu_count = sum(1 for g in recent if g.get('taiOrXiu') == 'xiu')
-    total = tai_count + xiu_count
-    
-    # Analyze current streak (last 20)
-    last_20 = game_list[:20]
-    streak_count, streak_type = analyze_streak(last_20)
-    
-    # Default probabilities
-    tai_prob = 0.5
-    xiu_prob = 0.5
-    
-    # ==========================================
-    # STREAK ADJUSTMENT (Strong intervention)
-    # ==========================================
-    if streak_type == 'tai':
-        if streak_count >= 7:
-            tai_prob = 0.05  # 5% tai
-            xiu_prob = 0.95  # 95% xiu
-        elif streak_count >= 6:
-            tai_prob = 0.15
-            xiu_prob = 0.85
-        elif streak_count >= 5:
-            tai_prob = 0.25
-            xiu_prob = 0.75
-        elif streak_count >= 4:
-            tai_prob = 0.35
-            xiu_prob = 0.65
-    elif streak_type == 'xiu':
-        if streak_count >= 7:
-            tai_prob = 0.95
-            xiu_prob = 0.05
-        elif streak_count >= 6:
-            tai_prob = 0.85
-            xiu_prob = 0.15
-        elif streak_count >= 5:
-            tai_prob = 0.75
-            xiu_prob = 0.25
-        elif streak_count >= 4:
-            tai_prob = 0.65
-            xiu_prob = 0.35
-    
-    # ==========================================
-    # BALANCE ADJUSTMENT (Long-term 45-55%)
-    # ==========================================
-    if total > 20:
-        tai_percent = tai_count / total
-        
-        if tai_percent > 0.70:  # Too many Tai
-            tai_prob -= 0.20
-            xiu_prob += 0.20
-        elif tai_percent > 0.60:  # Slightly too many Tai
-            tai_prob -= 0.10
-            xiu_prob += 0.10
-        elif tai_percent < 0.30:  # Too few Tai
-            tai_prob += 0.20
-            xiu_prob -= 0.20
-        elif tai_percent < 0.40:  # Slightly too few Tai
-            tai_prob += 0.10
-            xiu_prob -= 0.10
-    
-    # ==========================================
-    # NORMALIZE PROBABILITIES
-    # ==========================================
-    total_prob = tai_prob + xiu_prob
-    tai_prob = max(0.05, min(0.95, tai_prob / total_prob))
-    xiu_prob = 1.0 - tai_prob
-    
-    # ==========================================
-    # ROLL WITH WEIGHTED PROBABILITY
-    # ==========================================
-    # Decide Tai or Xiu first
-    if random.random() < tai_prob:
-        # Roll TAI (11-17)
-        total_score = random.randint(11, 17)
-    else:
-        # Roll XIU (4-10)
-        total_score = random.randint(4, 10)
-    
-    # Generate 3 dice that sum to total_score
-    dice1, dice2, dice3 = generate_dice_for_total(total_score)
-    
-    # Log for debugging
-    print(f"🎯 AI Roll: streak={streak_count}{streak_type}, tai_p={tai_prob:.2f}, xiu_p={xiu_prob:.2f}, result={total_score}")
-    
-    return dice1, dice2, dice3
-
-def generate_dice_for_total(target: int) -> Tuple[int, int, int]:
-    """Generate 3 dice that sum to target"""
-    attempts = 0
-    while attempts < 1000:
-        d1 = random.randint(1, 6)
-        d2 = random.randint(1, 6)
-        d3 = random.randint(1, 6)
-        if d1 + d2 + d3 == target:
-            return d1, d2, d3
-        attempts += 1
-    
-    # Fallback: generate closest possible
-    d1 = min(6, max(1, target // 3))
-    remaining = target - d1
-    d2 = min(6, max(1, remaining // 2))
-    d3 = target - d1 - d2
-    
-    if d3 < 1:
-        d2 -= (1 - d3)
-        d3 = 1
-    elif d3 > 6:
-        d2 += (d3 - 6)
-        d3 = 6
-    
-    return d1, d2, d3
-
-def detect_cau_pattern(game_list: List[Dict]) -> str:
-    """Detect current cau pattern"""
-    if len(game_list) < 4:
-        return "Chưa đủ dữ liệu"
-    
-    recent = game_list[:10]
-    tai_xiu = [g.get('taiOrXiu', '') for g in recent if g.get('taiOrXiu') != 'triple']
-    
-    if len(tai_xiu) < 4:
-        return "Đang phân tích..."
-    
-    # Check patterns
-    # 1-1 pattern
-    if len(tai_xiu) >= 4:
-        is_1_1 = all(tai_xiu[i] != tai_xiu[i+1] for i in range(min(4, len(tai_xiu)-1)))
-        if is_1_1:
-            return "Cầu 1-1 (Đơn xen kẽ)"
-    
-    # 2-2 pattern
-    if len(tai_xiu) >= 6:
-        pairs = [tai_xiu[i:i+2] for i in range(0, 6, 2)]
-        if len(pairs) >= 2 and all(len(set(p)) == 1 for p in pairs) and pairs[0] != pairs[1]:
-            return "Cầu 2-2"
-    
-    # 3-3 pattern
-    if len(tai_xiu) >= 9:
-        triples = [tai_xiu[i:i+3] for i in range(0, 9, 3)]
-        if len(triples) >= 2 and all(len(set(t)) == 1 for t in triples) and triples[0] != triples[1]:
-            return "Cầu 3-3"
-    
-    # Bet pattern (same result repeated)
-    streak_count, streak_type = analyze_streak(game_list)
-    if streak_count >= 4:
-        return f"Cầu bệt {streak_type.upper()} ({streak_count} phiên)"
-    
-    if streak_count == 3:
-        return f"Có dấu hiệu bệt {streak_type.upper()}"
-    
-    return "Cầu gãy / Không xác định"
 
 # ============================================
 # GAME: TAI XIU V2 (SLASH CHOICES)
 # ============================================
 @bot.tree.command(name="taixiu", description="🎲 Chơi Tài Xỉu")
-@app_commands.describe(
-    cuoc="Chọn cửa cược",
-    sotien="Số tiền cược (nhập số hoặc 'all')"
-)
+@app_commands.describe(cuoc="Chọn cửa cược", sotien="Số tiền cược (nhập số hoặc 'all')")
 @app_commands.choices(cuoc=[
     app_commands.Choice(name="🔴 Tài (11-17)", value="tai"),
     app_commands.Choice(name="🔵 Xỉu (4-10)", value="xiu"),
@@ -1793,7 +1683,6 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
     
     user_data = await create_user_if_not_exists(user_id)
     
-    # Parse bet amount
     if sotien.lower() == "all":
         bet_amount = user_data["balance"]
     else:
@@ -1810,27 +1699,21 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
         await interaction.response.send_message("❌ Số dư không đủ!", ephemeral=True)
         return
     
-    # Parse bet type from choice value
     bet_type = cuoc
     is_specific = bet_type.isdigit()
     specific_number = int(bet_type) if is_specific else 0
     
-    # Deduct bet
     success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    # Get game history for AI
     game_list = get_recent_games(100)
-    
-    # AI-driven roll or pure random
     dice1, dice2, dice3 = calculate_weighted_roll(game_list)
     total = dice1 + dice2 + dice3
     
     dice_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
     
-    # Animation
     embed = create_embed(title="🎲 Tài Xỉu", description="Đang lắc xúc xắc...", color=COLOR_GOLD)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
@@ -1843,20 +1726,9 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
             desc = f"{dice_emojis[dice1]} {dice_emojis[dice2]} ?"
         else:
             desc = f"{dice_emojis[dice1]} {dice_emojis[dice2]} {dice_emojis[dice3]}"
-        
         embed = create_embed(title="🎲 Tài Xỉu", description=f"**Xúc xắc:** {desc}", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
-    # Final result
-    embed = create_embed(
-        title="🎲 Tài Xỉu",
-        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n🎲 Đang tính kết quả...",
-        color=COLOR_GOLD
-    )
-    await msg.edit(embed=embed)
-    await asyncio.sleep(0.5)
-    
-    # Determine result
     is_tai = 11 <= total <= 17
     is_xiu = 4 <= total <= 10
     is_chan = total % 2 == 0
@@ -1887,7 +1759,6 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
             multiplier = 2
             win = True
     
-    # Display result
     if is_triple:
         tai_xiu_text = "⚠️ BỘ BA"
     elif is_tai:
@@ -1911,50 +1782,26 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
         await add_win(user_id, win_amount)
         result_text = f"🎉 Bạn đã thắng **{win_amount:,} VNĐ**! (x{multiplier})"
         await update_user_stats(user_id, True, bet_amount, win_amount)
-
-
-
-
-
-
     
-    # Save game history
     get_game_history_ref().add({
-        "result": total,
-        "dice1": dice1,
-        "dice2": dice2,
-        "dice3": dice3,
-        "betType": bet_type,
-        "betAmount": bet_amount,
-        "win": win,
-        "multiplier": multiplier,
+        "result": total, "dice1": dice1, "dice2": dice2, "dice3": dice3,
+        "betType": bet_type, "betAmount": bet_amount, "win": win, "multiplier": multiplier,
         "taiOrXiu": "tai" if is_tai else ("xiu" if is_xiu else "triple"),
-        "createdAt": datetime.now(timezone.utc),
-        "userId": user_id
+        "createdAt": datetime.now(timezone.utc), "userId": user_id
     })
     
     embed = create_embed(
         title="🎲 Kết Quả Tài Xỉu",
-        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n"
-                   f"📊 Tổng điểm: **{total}**\n"
-                   f"🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n"
-                   f"{result_text}",
+        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n📊 Tổng điểm: **{total}**\n🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n{result_text}",
         color=COLOR_SUCCESS if win else COLOR_ERROR
     )
     await msg.edit(embed=embed)
-
-
-
-
 
 # ============================================
 # CREATE ROOM COMMAND
 # ============================================
 @bot.tree.command(name="taophong", description="🏠 Tạo phòng chơi game")
-@app_commands.describe(
-    game="Chọn game muốn chơi",
-    bet="Số tiền cược mỗi người"
-)
+@app_commands.describe(game="Chọn game muốn chơi", bet="Số tiền cược mỗi người")
 @app_commands.choices(game=[
     app_commands.Choice(name="🎲 Tài Xỉu Đối Kháng", value="taixiu"),
     app_commands.Choice(name="🃏 Blackjack", value="blackjack"),
@@ -1963,17 +1810,11 @@ async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
 async def taophong(interaction: discord.Interaction, game: str, bet: str):
     user_id = str(interaction.user.id)
     
-    # Check if player already has a room
     existing_room = room_manager.get_player_room(user_id)
     if existing_room:
-        await interaction.response.send_message(
-            "❌ Bạn đang sở hữu hoặc tham gia một phòng khác.\n"
-            "Vui lòng kết thúc hoặc rời phòng hiện tại trước khi tạo phòng mới.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("❌ Bạn đang sở hữu hoặc tham gia một phòng khác.\nVui lòng kết thúc hoặc rời phòng hiện tại trước khi tạo phòng mới.", ephemeral=True)
         return
     
-    # Parse bet
     try:
         bet_amount = int(bet)
     except ValueError:
@@ -1984,52 +1825,36 @@ async def taophong(interaction: discord.Interaction, game: str, bet: str):
         await interaction.response.send_message("❌ Tiền cược tối thiểu là 10,000 VNĐ!", ephemeral=True)
         return
     
-    # Check balance
     user_data = await create_user_if_not_exists(user_id)
     if user_data["balance"] < bet_amount:
         await interaction.response.send_message(f"❌ Số dư không đủ! Cần {bet_amount:,} VNĐ", ephemeral=True)
         return
     
-    # Deduct bet
     success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    # Create thread
     game_names = {"taixiu": "🎲 Tài Xỉu", "blackjack": "🃏 Blackjack", "tienlen": "🀄 Tiến Lên"}
     thread_name = f"{game_names[game]} - {interaction.user.name}"
     
-    thread = await interaction.channel.create_thread(
-        name=thread_name,
-        type=discord.ChannelType.public_thread,
-        auto_archive_duration=60
-    )
+    thread = await interaction.channel.create_thread(name=thread_name, type=discord.ChannelType.public_thread, auto_archive_duration=60)
     
-    # Create room
     room_id = f"{interaction.guild.id}_{thread.id}"
     room_manager.create_room(user_id, room_id, game, thread, bet_amount)
     
-    # Create room view
     view = RoomView(room_id, user_id, bet_amount, game)
     room_manager.store_view(room_id, view)
     
-    # Send room info
     embed = create_embed(
         title=f"🏠 Phòng {game_names[game]}",
-        description=f"**Chủ phòng:** {interaction.user.mention}\n"
-                   f"**Game:** {game_names[game]}\n"
-                   f"**Tiền cược:** {bet_amount:,} VNĐ/người\n\n"
-                   f"👤 **Người chơi (1/4):**\n"
-                   f"1. {interaction.user.mention}\n\n"
-                   f"⏰ Phòng sẽ tự đóng sau 5 phút nếu không đủ người!",
+        description=f"**Chủ phòng:** {interaction.user.mention}\n**Game:** {game_names[game]}\n**Tiền cược:** {bet_amount:,} VNĐ/người\n\n👤 **Người chơi (1/4):**\n1. {interaction.user.mention}\n\n⏰ Phòng sẽ tự đóng sau 5 phút nếu không đủ người!",
         color=COLOR_GOLD
     )
     
     await thread.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Đã tạo phòng tại {thread.mention}!", ephemeral=True)
     
-    # Auto-close timer
     asyncio.create_task(auto_close_room(room_id, thread, 300))
 
 class RoomView(discord.ui.View):
@@ -2044,28 +1869,23 @@ class RoomView(discord.ui.View):
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
         
-        # Check if already in a room
         existing = room_manager.get_player_room(user_id)
         if existing:
             await interaction.response.send_message("❌ Bạn đang ở phòng khác!", ephemeral=True)
             return
         
-        # Check balance
         user_data = await create_user_if_not_exists(user_id)
         if user_data["balance"] < self.bet_amount:
             await interaction.response.send_message(f"❌ Số dư không đủ! Cần {self.bet_amount:,} VNĐ", ephemeral=True)
             return
         
-        # Deduct bet
         success = await deduct_bet(user_id, self.bet_amount)
         if not success:
             await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
             return
         
-        # Join room
         room_manager.join_room(user_id, self.room_id)
         
-        # Update room display
         room = room_manager.get_room(self.room_id)
         if room:
             players_text = "\n".join([f"{i+1}. <@{pid}>" for i, pid in enumerate(room["players"])])
@@ -2075,7 +1895,6 @@ class RoomView(discord.ui.View):
         
         await interaction.response.send_message("✅ Đã tham gia phòng!", ephemeral=True)
         
-        # Start game if enough players
         if room and len(room["players"]) >= 2:
             room_manager.set_room_status(self.room_id, RoomStatus.PLAYING)
             await self.start_game(interaction)
@@ -2085,20 +1904,15 @@ class RoomView(discord.ui.View):
         user_id = str(interaction.user.id)
         
         if user_id == self.owner_id:
-            # Owner leaving - disband room
             await interaction.response.send_message("❌ Chủ phòng đã rời. Phòng bị giải tán.", ephemeral=False)
             thread = interaction.channel
             await asyncio.sleep(3)
             await cleanup_and_delete_room(self.room_id, thread)
             return
         
-        # Leave room
         room_manager.leave_room(user_id, self.room_id)
-        
-        # Refund
         await add_win(user_id, self.bet_amount)
         
-        # Update display
         room = room_manager.get_room(self.room_id)
         if room:
             players_text = "\n".join([f"{i+1}. <@{pid}>" for i, pid in enumerate(room["players"])])
@@ -2108,7 +1922,6 @@ class RoomView(discord.ui.View):
         
         await interaction.response.send_message(f"✅ Đã rời phòng! Hoàn trả {self.bet_amount:,} VNĐ", ephemeral=True)
         
-        # Check if room is empty
         if room and len(room["players"]) == 0:
             await cleanup_and_delete_room(self.room_id, interaction.channel)
     
@@ -2129,7 +1942,6 @@ class RoomView(discord.ui.View):
         await self.start_game(interaction)
     
     async def start_game(self, interaction: discord.Interaction):
-        """Start the game based on type"""
         room = room_manager.get_room(self.room_id)
         if not room:
             return
@@ -2141,89 +1953,6 @@ class RoomView(discord.ui.View):
         elif self.game_type == "tienlen":
             await start_tienlen_game(self.room_id, interaction.channel)
 
-
-
-
-
-
-async def auto_close_room(room_id: str, thread: discord.Thread, timeout: int):
-    """Auto close room after timeout if not started"""
-    await asyncio.sleep(timeout)
-    
-    room = room_manager.get_room(room_id)
-    if room and room["status"] == RoomStatus.WAITING:
-        # Refund all players
-        for player_id in room["players"]:
-            await add_win(player_id, room["betAmount"])
-        
-        # Send timeout message
-        try:
-            await thread.send("⏰ Phòng đã hết hạn do không đủ người chơi.\n💰 Tiền cược đã được hoàn trả.")
-        except:
-            pass
-        
-        # Cleanup
-        await asyncio.sleep(3)
-        await cleanup_and_delete_room(room_id, thread)
-
-async def cleanup_and_delete_room(room_id: str, thread: discord.Thread):
-    """Full cleanup and delete thread"""
-    room = room_manager.get_room(room_id)
-    
-    # Refund any remaining players if game not finished
-    if room and room["status"] != RoomStatus.FINISHED:
-        for player_id in room["players"]:
-            if room["status"] == RoomStatus.WAITING:
-                await add_win(player_id, room["betAmount"])
-    
-    # Cleanup room
-    await room_manager.cleanup_room(room_id)
-    
-    # Delete thread
-    try:
-        await thread.delete()
-        print(f"🗑️ Deleted thread: {thread.id}")
-    except Exception as e:
-        print(f"Error deleting thread: {e}")
-
-async def end_game_and_cleanup(room_id: str, thread: discord.Thread, results: Dict):
-    """End game, announce results, cleanup after 15 seconds"""
-    room = room_manager.get_room(room_id)
-    if not room:
-        return
-    
-    room_manager.set_room_status(room_id, RoomStatus.FINISHED)
-    
-    # Build result message
-    description = "🏆 **KẾT QUẢ TRẬN ĐẤU**\n\n"
-    
-    for i, (player_id, data) in enumerate(results.get("rankings", {}).items()):
-        medal = ["🥇", "🥈", "🥉", "💀"][i] if i < 4 else f"{i+1}."
-        description += f"{medal} <@{player_id}> - {data.get('reward', 0):,} VNĐ\n"
-    
-    description += f"\n🗑️ Phòng sẽ tự đóng sau 15 giây..."
-    
-    embed = create_embed(
-        title="🏆 Trận Đấu Kết Thúc",
-        description=description,
-        color=COLOR_GOLD
-    )
-    
-    await thread.send(embed=embed)
-    
-    # Save game history
-    game_history_data = {
-        "roomId": room_id,
-        "gameType": room["gameType"],
-        "players": room["players"],
-        "results": results,
-        "createdAt": datetime.now(timezone.utc)
-    }
-    db.collection("room_history").add(game_history_data)
-    
-    # Wait 15 seconds then cleanup
-    await asyncio.sleep(15)
-    await cleanup_and_delete_room(room_id, thread)
 # ============================================
 # GAME: COINFLIP
 # ============================================
@@ -2348,7 +2077,6 @@ async def slot(interaction: discord.Interaction, amount: str):
             else:
                 temp_row = reels[row]
             display += " ".join(temp_row) + "\n"
-        
         embed = create_embed(title="🎰 Slot Machine", description=f"```\n{display}```", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
@@ -2441,17 +2169,13 @@ async def cau(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "cau")
     
-    # Animation
     await interaction.response.send_message("⏳ Đang phân tích cầu...")
     msg = await interaction.original_response()
     await asyncio.sleep(1)
-    
     await msg.edit(content="📊 Đang tạo biểu đồ...")
     await asyncio.sleep(1)
-    
     await msg.edit(content="🤖 AI đang phân tích...")
     
-    # Get game history
     games = get_game_history_ref().order_by("createdAt", direction=firestore.Query.DESCENDING).limit(20).get()
     game_list = [doc.to_dict() for doc in games]
     
@@ -2459,10 +2183,7 @@ async def cau(interaction: discord.Interaction):
         await msg.edit(content="❌ Cần ít nhất 3 phiên Tài Xỉu để phân tích! Hãy chơi /taixiu trước.")
         return
     
-    # Generate chart
     buf = generate_cau_chart(game_list)
-    
-    # Send image
     await msg.edit(content=None, attachments=[discord.File(buf, filename="cau.png")])
 
 # ============================================
@@ -2510,15 +2231,12 @@ async def addmoney(interaction: discord.Interaction, user: discord.User, amount:
     if not await is_admin(str(interaction.user.id)):
         await interaction.response.send_message("❌ Bạn không có quyền sử dụng lệnh này!", ephemeral=True)
         return
-    
     if amount <= 0:
         await interaction.response.send_message("❌ Số tiền phải lớn hơn 0!", ephemeral=True)
         return
-    
     target_id = str(user.id)
     await create_user_if_not_exists(target_id)
     success = await add_money(target_id, amount, str(interaction.user.id))
-    
     if success:
         embed = create_embed(title="💰 Thêm Tiền", description=f"Đã thêm **{amount:,} VNĐ** cho **{user.name}**!", color=COLOR_SUCCESS, thumbnail_url=user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
@@ -2531,15 +2249,12 @@ async def trutien(interaction: discord.Interaction, user: discord.User, amount: 
     if not await is_admin(str(interaction.user.id)):
         await interaction.response.send_message("❌ Bạn không có quyền sử dụng lệnh này!", ephemeral=True)
         return
-    
     if amount <= 0:
         await interaction.response.send_message("❌ Số tiền phải lớn hơn 0!", ephemeral=True)
         return
-    
     target_id = str(user.id)
     await create_user_if_not_exists(target_id)
     success = await remove_money(target_id, amount, str(interaction.user.id))
-    
     if success:
         embed = create_embed(title="💸 Trừ Tiền", description=f"Đã trừ **{amount:,} VNĐ** từ **{user.name}**!", color=COLOR_WARNING, thumbnail_url=user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
@@ -2552,7 +2267,6 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
     if not await is_admin(str(interaction.user.id)):
         await interaction.response.send_message("❌ Bạn không có quyền sử dụng lệnh này!", ephemeral=True)
         return
-    
     if amount <= 0:
         await interaction.response.send_message("❌ Số tiền phải lớn hơn 0!", ephemeral=True)
         return
@@ -2565,11 +2279,9 @@ async def phatlixi(interaction: discord.Interaction, amount: int):
         @discord.ui.button(label="Nhận Lì Xì", style=discord.ButtonStyle.success, emoji="🧧")
         async def claim(self, button_interaction: discord.Interaction, button: discord.ui.Button):
             user_id_btn = str(button_interaction.user.id)
-            
             if user_id_btn in self.claimed:
                 await button_interaction.response.send_message("❌ Bạn đã nhận lì xì rồi!", ephemeral=True)
                 return
-            
             await create_user_if_not_exists(user_id_btn)
             await add_money(user_id_btn, amount, str(interaction.user.id))
             self.claimed.add(user_id_btn)
@@ -2703,14 +2415,10 @@ async def phantich(interaction: discord.Interaction):
     xiu_count = sum(1 for g in game_list if g.get("taiOrXiu") == "xiu")
     total = tai_count + xiu_count
     
-    # Detect cau pattern
     cau_pattern = detect_cau_pattern(game_list)
-    
-    # Current streak
     streak_count, streak_type = analyze_streak(game_list)
     streak_text = f"{streak_count} ván {streak_type.upper() if streak_type else 'N/A'} liên tiếp" if streak_type else "Không có"
     
-    # Prediction
     confidence = 50 + min(len(game_list), 29)
     if tai_count > xiu_count:
         prediction = f"{EMOJI_TAI} TÀI"
@@ -2723,13 +2431,7 @@ async def phantich(interaction: discord.Interaction):
     
     embed = create_embed(
         title="📊 Phân Tích Tài Xỉu",
-        description=f"**20 ván gần nhất**\n\n"
-                   f"{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n"
-                   f"{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n"
-                   f"📈 Loại cầu: **{cau_pattern}**\n"
-                   f"🔥 Chuỗi hiện tại: **{streak_text}**\n"
-                   f"🎯 Độ tin cậy: **{confidence}%**\n\n"
-                   f"🔮 Dự đoán: **{prediction}**",
+        description=f"**20 ván gần nhất**\n\n{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n📈 Loại cầu: **{cau_pattern}**\n🔥 Chuỗi hiện tại: **{streak_text}**\n🎯 Độ tin cậy: **{confidence}%**\n\n🔮 Dự đoán: **{prediction}**",
         color=COLOR_INFO,
         footer_text="⚠️ Dự đoán chỉ mang tính tham khảo"
     )
