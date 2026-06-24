@@ -1413,24 +1413,249 @@ async def anxin(interaction: discord.Interaction, user: discord.User, amount: in
     await interaction.response.send_message(embed=embed, view=XinView())
 
 # ============================================
-# GAME: TAI XIU
+# ANTI-STREAK SYSTEM
+# ============================================
+ANTI_STREAK_ENABLED = True
+MAX_HISTORY_FOR_ANALYSIS = 100
+
+def get_recent_games(limit: int = 100) -> List[Dict]:
+    """Get recent game history for analysis"""
+    games = get_game_history_ref().order_by(
+        "createdAt", direction=firestore.Query.DESCENDING
+    ).limit(limit).get()
+    return [doc.to_dict() for doc in games]
+
+def analyze_streak(game_list: List[Dict]) -> Tuple[int, Optional[str]]:
+    """Analyze current streak. Returns (streak_count, streak_type)"""
+    if not game_list:
+        return 0, None
+    
+    streak_type = None
+    count = 0
+    
+    for g in game_list:
+        tai_xiu = g.get('taiOrXiu', '')
+        if tai_xiu == 'triple':
+            continue
+        if streak_type is None:
+            streak_type = tai_xiu
+            count = 1
+        elif tai_xiu == streak_type:
+            count += 1
+        else:
+            break
+    
+    return count, streak_type
+
+def calculate_weighted_roll(game_list: List[Dict]) -> Tuple[int, int, int]:
+    """
+    AI-driven weighted roll system
+    Returns (dice1, dice2, dice3) with adjusted probabilities
+    """
+    if not ANTI_STREAK_ENABLED:
+        return random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+    
+    # Analyze last 100 games
+    recent = game_list[:MAX_HISTORY_FOR_ANALYSIS]
+    
+    tai_count = sum(1 for g in recent if g.get('taiOrXiu') == 'tai')
+    xiu_count = sum(1 for g in recent if g.get('taiOrXiu') == 'xiu')
+    total = tai_count + xiu_count
+    
+    # Analyze current streak (last 20)
+    last_20 = game_list[:20]
+    streak_count, streak_type = analyze_streak(last_20)
+    
+    # Default probabilities
+    tai_prob = 0.5
+    xiu_prob = 0.5
+    
+    # ==========================================
+    # STREAK ADJUSTMENT (Strong intervention)
+    # ==========================================
+    if streak_type == 'tai':
+        if streak_count >= 7:
+            tai_prob = 0.05  # 5% tai
+            xiu_prob = 0.95  # 95% xiu
+        elif streak_count >= 6:
+            tai_prob = 0.15
+            xiu_prob = 0.85
+        elif streak_count >= 5:
+            tai_prob = 0.25
+            xiu_prob = 0.75
+        elif streak_count >= 4:
+            tai_prob = 0.35
+            xiu_prob = 0.65
+    elif streak_type == 'xiu':
+        if streak_count >= 7:
+            tai_prob = 0.95
+            xiu_prob = 0.05
+        elif streak_count >= 6:
+            tai_prob = 0.85
+            xiu_prob = 0.15
+        elif streak_count >= 5:
+            tai_prob = 0.75
+            xiu_prob = 0.25
+        elif streak_count >= 4:
+            tai_prob = 0.65
+            xiu_prob = 0.35
+    
+    # ==========================================
+    # BALANCE ADJUSTMENT (Long-term 45-55%)
+    # ==========================================
+    if total > 20:
+        tai_percent = tai_count / total
+        
+        if tai_percent > 0.70:  # Too many Tai
+            tai_prob -= 0.20
+            xiu_prob += 0.20
+        elif tai_percent > 0.60:  # Slightly too many Tai
+            tai_prob -= 0.10
+            xiu_prob += 0.10
+        elif tai_percent < 0.30:  # Too few Tai
+            tai_prob += 0.20
+            xiu_prob -= 0.20
+        elif tai_percent < 0.40:  # Slightly too few Tai
+            tai_prob += 0.10
+            xiu_prob -= 0.10
+    
+    # ==========================================
+    # NORMALIZE PROBABILITIES
+    # ==========================================
+    total_prob = tai_prob + xiu_prob
+    tai_prob = max(0.05, min(0.95, tai_prob / total_prob))
+    xiu_prob = 1.0 - tai_prob
+    
+    # ==========================================
+    # ROLL WITH WEIGHTED PROBABILITY
+    # ==========================================
+    # Decide Tai or Xiu first
+    if random.random() < tai_prob:
+        # Roll TAI (11-17)
+        total_score = random.randint(11, 17)
+    else:
+        # Roll XIU (4-10)
+        total_score = random.randint(4, 10)
+    
+    # Generate 3 dice that sum to total_score
+    dice1, dice2, dice3 = generate_dice_for_total(total_score)
+    
+    # Log for debugging
+    print(f"🎯 AI Roll: streak={streak_count}{streak_type}, tai_p={tai_prob:.2f}, xiu_p={xiu_prob:.2f}, result={total_score}")
+    
+    return dice1, dice2, dice3
+
+def generate_dice_for_total(target: int) -> Tuple[int, int, int]:
+    """Generate 3 dice that sum to target"""
+    attempts = 0
+    while attempts < 1000:
+        d1 = random.randint(1, 6)
+        d2 = random.randint(1, 6)
+        d3 = random.randint(1, 6)
+        if d1 + d2 + d3 == target:
+            return d1, d2, d3
+        attempts += 1
+    
+    # Fallback: generate closest possible
+    d1 = min(6, max(1, target // 3))
+    remaining = target - d1
+    d2 = min(6, max(1, remaining // 2))
+    d3 = target - d1 - d2
+    
+    if d3 < 1:
+        d2 -= (1 - d3)
+        d3 = 1
+    elif d3 > 6:
+        d2 += (d3 - 6)
+        d3 = 6
+    
+    return d1, d2, d3
+
+def detect_cau_pattern(game_list: List[Dict]) -> str:
+    """Detect current cau pattern"""
+    if len(game_list) < 4:
+        return "Chưa đủ dữ liệu"
+    
+    recent = game_list[:10]
+    tai_xiu = [g.get('taiOrXiu', '') for g in recent if g.get('taiOrXiu') != 'triple']
+    
+    if len(tai_xiu) < 4:
+        return "Đang phân tích..."
+    
+    # Check patterns
+    # 1-1 pattern
+    if len(tai_xiu) >= 4:
+        is_1_1 = all(tai_xiu[i] != tai_xiu[i+1] for i in range(min(4, len(tai_xiu)-1)))
+        if is_1_1:
+            return "Cầu 1-1 (Đơn xen kẽ)"
+    
+    # 2-2 pattern
+    if len(tai_xiu) >= 6:
+        pairs = [tai_xiu[i:i+2] for i in range(0, 6, 2)]
+        if len(pairs) >= 2 and all(len(set(p)) == 1 for p in pairs) and pairs[0] != pairs[1]:
+            return "Cầu 2-2"
+    
+    # 3-3 pattern
+    if len(tai_xiu) >= 9:
+        triples = [tai_xiu[i:i+3] for i in range(0, 9, 3)]
+        if len(triples) >= 2 and all(len(set(t)) == 1 for t in triples) and triples[0] != triples[1]:
+            return "Cầu 3-3"
+    
+    # Bet pattern (same result repeated)
+    streak_count, streak_type = analyze_streak(game_list)
+    if streak_count >= 4:
+        return f"Cầu bệt {streak_type.upper()} ({streak_count} phiên)"
+    
+    if streak_count == 3:
+        return f"Có dấu hiệu bệt {streak_type.upper()}"
+    
+    return "Cầu gãy / Không xác định"
+
+# ============================================
+# GAME: TAI XIU V2 (SLASH CHOICES)
 # ============================================
 @bot.tree.command(name="taixiu", description="🎲 Chơi Tài Xỉu")
-@app_commands.describe(cua="Cửa cược (tai/xiu/chan/le hoặc số 3-18)", cuoc="Số tiền cược (nhập 'all' để cược tất cả)")
+@app_commands.describe(
+    cuoc="Chọn cửa cược",
+    sotien="Số tiền cược (nhập số hoặc 'all')"
+)
+@app_commands.choices(cuoc=[
+    app_commands.Choice(name="🔴 Tài (11-17)", value="tai"),
+    app_commands.Choice(name="🔵 Xỉu (4-10)", value="xiu"),
+    app_commands.Choice(name="⚪ Chẵn", value="chan"),
+    app_commands.Choice(name="⚫ Lẻ", value="le"),
+    app_commands.Choice(name="🎯 Tổng 3", value="3"),
+    app_commands.Choice(name="🎯 Tổng 4", value="4"),
+    app_commands.Choice(name="🎯 Tổng 5", value="5"),
+    app_commands.Choice(name="🎯 Tổng 6", value="6"),
+    app_commands.Choice(name="🎯 Tổng 7", value="7"),
+    app_commands.Choice(name="🎯 Tổng 8", value="8"),
+    app_commands.Choice(name="🎯 Tổng 9", value="9"),
+    app_commands.Choice(name="🎯 Tổng 10", value="10"),
+    app_commands.Choice(name="🎯 Tổng 11", value="11"),
+    app_commands.Choice(name="🎯 Tổng 12", value="12"),
+    app_commands.Choice(name="🎯 Tổng 13", value="13"),
+    app_commands.Choice(name="🎯 Tổng 14", value="14"),
+    app_commands.Choice(name="🎯 Tổng 15", value="15"),
+    app_commands.Choice(name="🎯 Tổng 16", value="16"),
+    app_commands.Choice(name="🎯 Tổng 17", value="17"),
+    app_commands.Choice(name="🎯 Tổng 18", value="18"),
+])
 @check_cooldown("taixiu", COOLDOWN_NORMAL)
-async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
+async def taixiu(interaction: discord.Interaction, cuoc: str, sotien: str):
     user_id = str(interaction.user.id)
     cooldown_manager.set_cooldown(user_id, "taixiu")
     
     user_data = await create_user_if_not_exists(user_id)
     
-    if cuoc.lower() == "all":
+    # Parse bet amount
+    if sotien.lower() == "all":
         bet_amount = user_data["balance"]
     else:
         try:
-            bet_amount = int(cuoc)
+            bet_amount = int(sotien)
         except ValueError:
-            await interaction.response.send_message("❌ Số tiền cược không hợp lệ!", ephemeral=True)
+            await interaction.response.send_message("❌ Số tiền không hợp lệ!", ephemeral=True)
             return
     
     if bet_amount <= 0:
@@ -1440,41 +1665,27 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         await interaction.response.send_message("❌ Số dư không đủ!", ephemeral=True)
         return
     
-    cua_lower = cua.lower()
-    is_specific = False
-    specific_number = 0
+    # Parse bet type from choice value
+    bet_type = cuoc
+    is_specific = bet_type.isdigit()
+    specific_number = int(bet_type) if is_specific else 0
     
-    if cua_lower in ["tai", "tài"]:
-        bet_type = "tai"
-    elif cua_lower in ["xiu", "xỉu"]:
-        bet_type = "xiu"
-    elif cua_lower in ["chan", "chẵn"]:
-        bet_type = "chan"
-    elif cua_lower in ["le", "lẻ"]:
-        bet_type = "le"
-    else:
-        try:
-            specific_number = int(cua_lower)
-            if 3 <= specific_number <= 18:
-                is_specific = True
-                bet_type = str(specific_number)
-            else:
-                await interaction.response.send_message("❌ Cửa cược không hợp lệ! (tai/xiu/chan/le hoặc 3-18)", ephemeral=True)
-                return
-        except ValueError:
-            await interaction.response.send_message("❌ Cửa cược không hợp lệ! (tai/xiu/chan/le hoặc 3-18)", ephemeral=True)
-            return
-    
+    # Deduct bet
     success = await deduct_bet(user_id, bet_amount)
     if not success:
         await interaction.response.send_message("❌ Không thể trừ tiền cược!", ephemeral=True)
         return
     
-    dice1, dice2, dice3 = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+    # Get game history for AI
+    game_list = get_recent_games(100)
+    
+    # AI-driven roll or pure random
+    dice1, dice2, dice3 = calculate_weighted_roll(game_list)
     total = dice1 + dice2 + dice3
     
     dice_emojis = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
     
+    # Animation
     embed = create_embed(title="🎲 Tài Xỉu", description="Đang lắc xúc xắc...", color=COLOR_GOLD)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
@@ -1488,9 +1699,19 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         else:
             desc = f"{dice_emojis[dice1]} {dice_emojis[dice2]} {dice_emojis[dice3]}"
         
-        embed = create_embed(title="🎲 Tài Xỉu", description=f"**Xúc xắc:** {desc}\n\n🎲 Tổng điểm: **{total}**", color=COLOR_GOLD)
+        embed = create_embed(title="🎲 Tài Xỉu", description=f"**Xúc xắc:** {desc}", color=COLOR_GOLD)
         await msg.edit(embed=embed)
     
+    # Final result
+    embed = create_embed(
+        title="🎲 Tài Xỉu",
+        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n🎲 Đang tính kết quả...",
+        color=COLOR_GOLD
+    )
+    await msg.edit(embed=embed)
+    await asyncio.sleep(0.5)
+    
+    # Determine result
     is_tai = 11 <= total <= 17
     is_xiu = 4 <= total <= 10
     is_chan = total % 2 == 0
@@ -1521,6 +1742,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
             multiplier = 2
             win = True
     
+    # Display result
     if is_triple:
         tai_xiu_text = "⚠️ BỘ BA"
     elif is_tai:
@@ -1545,6 +1767,7 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
         result_text = f"🎉 Bạn đã thắng **{win_amount:,} VNĐ**! (x{multiplier})"
         await update_user_stats(user_id, True, bet_amount, win_amount)
     
+    # Save game history
     get_game_history_ref().add({
         "result": total,
         "dice1": dice1,
@@ -1561,11 +1784,13 @@ async def taixiu(interaction: discord.Interaction, cua: str, cuoc: str):
     
     embed = create_embed(
         title="🎲 Kết Quả Tài Xỉu",
-        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n📊 Tổng điểm: **{total}**\n🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n{result_text}",
+        description=f"**Xúc xắc:** {dice_emojis[dice1]} • {dice_emojis[dice2]} • {dice_emojis[dice3]}\n\n"
+                   f"📊 Tổng điểm: **{total}**\n"
+                   f"🎯 Kết quả: {tai_xiu_text} | {chan_le_text}\n\n"
+                   f"{result_text}",
         color=COLOR_SUCCESS if win else COLOR_ERROR
     )
     await msg.edit(embed=embed)
-
 # ============================================
 # GAME: COINFLIP
 # ============================================
@@ -2045,22 +2270,15 @@ async def phantich(interaction: discord.Interaction):
     xiu_count = sum(1 for g in game_list if g.get("taiOrXiu") == "xiu")
     total = tai_count + xiu_count
     
-    current_streak = 0
-    streak_type = None
-    for g in game_list:
-        if g.get("taiOrXiu") == "triple":
-            continue
-        if streak_type is None:
-            streak_type = g.get("taiOrXiu")
-            current_streak = 1
-        elif g.get("taiOrXiu") == streak_type:
-            current_streak += 1
-        else:
-            break
+    # Detect cau pattern
+    cau_pattern = detect_cau_pattern(game_list)
     
-    streak_text = f"{current_streak} ván {streak_type} liên tiếp" if streak_type else "Không có"
+    # Current streak
+    streak_count, streak_type = analyze_streak(game_list)
+    streak_text = f"{streak_count} ván {streak_type.upper() if streak_type else 'N/A'} liên tiếp" if streak_type else "Không có"
+    
+    # Prediction
     confidence = 50 + min(len(game_list), 29)
-    
     if tai_count > xiu_count:
         prediction = f"{EMOJI_TAI} TÀI"
     elif xiu_count > tai_count:
@@ -2072,7 +2290,13 @@ async def phantich(interaction: discord.Interaction):
     
     embed = create_embed(
         title="📊 Phân Tích Tài Xỉu",
-        description=f"**20 ván gần nhất**\n\n{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n🔥 Chuỗi hiện tại: **{streak_text}**\n🎯 Độ tin cậy: **{confidence}%**\n\n🔮 Dự đoán: **{prediction}**",
+        description=f"**20 ván gần nhất**\n\n"
+                   f"{EMOJI_TAI} Tài: **{tai_count}/{total} ({tai_percent:.0f}%)**\n"
+                   f"{EMOJI_XIU} Xỉu: **{xiu_count}/{total} ({100-tai_percent:.0f}%)**\n\n"
+                   f"📈 Loại cầu: **{cau_pattern}**\n"
+                   f"🔥 Chuỗi hiện tại: **{streak_text}**\n"
+                   f"🎯 Độ tin cậy: **{confidence}%**\n\n"
+                   f"🔮 Dự đoán: **{prediction}**",
         color=COLOR_INFO,
         footer_text="⚠️ Dự đoán chỉ mang tính tham khảo"
     )
